@@ -85,8 +85,7 @@ def quantity_vector(oracle):
     return tuple(row["quantity"] for row in oracle["balances"])
 
 
-def experiment(root):
-    source = root / "ledger.db"
+def initialize_backup_fixture(source):
     initialize(source)
     with closing(connect(source)) as db:
         mode = db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
@@ -95,6 +94,12 @@ def experiment(root):
         db.execute("CREATE TABLE padding (id INTEGER PRIMARY KEY, payload BLOB)")
         db.executemany("INSERT INTO padding VALUES (?,zeroblob(4096))",
                        ((i,) for i in range(24)))
+    return mode
+
+
+def experiment(root):
+    source = root / "ledger.db"
+    mode = initialize_backup_fixture(source)
     control_path = root / "control.db"
     control_steps = []
     backup(source, control_path, lambda *step: control_steps.append(step))

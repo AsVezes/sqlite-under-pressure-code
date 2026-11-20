@@ -27,20 +27,21 @@ def receive(pipe):
     return pipe.recv()
 
 
-def transfer(connection):
+def transfer(connection, operation_id="tx-001", quantity=3):
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")
     connection.execute(
-        "INSERT INTO transfer VALUES ('tx-001','item-bolt','loc-north','loc-south',3)"
+        "INSERT INTO transfer VALUES (?,'item-bolt','loc-north','loc-south',?)",
+        (operation_id, quantity),
     )
     connection.executemany(
         "UPDATE stock_balance SET quantity=quantity+? WHERE item_id='item-bolt' AND location_id=?",
-        [(-3, "loc-north"), (3, "loc-south")],
+        [(-quantity, "loc-north"), (quantity, "loc-south")],
     )
     connection.executemany(
         "INSERT INTO journal_entry(transfer_id,item_id,location_id,delta)"
-        " VALUES ('tx-001','item-bolt',?,?)",
-        [("loc-north", -3), ("loc-south", 3)],
+        " VALUES (?,'item-bolt',?,?)",
+        [(operation_id, "loc-north", -quantity), (operation_id, "loc-south", quantity)],
     )
 
 
