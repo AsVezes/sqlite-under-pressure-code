@@ -206,6 +206,31 @@ class E1OracleTests(unittest.TestCase):
             "O1_BALANCE_MISMATCH:item-bolt:loc-north", result["errors"]
         )
 
+    def test_matching_negative_opening_and_balance_are_rejected(self):
+        # Simulate an external writer bypassing CHECK on both tables.
+        # Projection and conservation alone would otherwise pass.
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            self.assertEqual(
+                connection.execute("PRAGMA ignore_check_constraints").fetchone()[0],
+                1,
+            )
+            connection.execute(
+                "UPDATE opening_balance SET quantity = -1 "
+                "WHERE item_id='item-bolt' AND location_id='loc-north'"
+            )
+            connection.execute(
+                "UPDATE stock_balance SET quantity = -1 "
+                "WHERE item_id='item-bolt' AND location_id='loc-north'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_NEGATIVE_QUANTITY", result["errors"])
+
     def test_balances_without_journal_fail_even_if_total_conserved(self):
         self.sql("""
             UPDATE stock_balance SET quantity = 9
