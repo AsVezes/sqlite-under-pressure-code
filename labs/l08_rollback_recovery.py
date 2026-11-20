@@ -21,6 +21,9 @@ sys.stdin.buffer.read(1)
 
 
 def main():
+    if len(sys.argv) != 1:
+        print("L08 accepts no arguments or external database paths", file=sys.stderr)
+        return 2
     with tempfile.TemporaryDirectory(prefix="sqlite-l08-") as tmp:
         root = Path(tmp).resolve()
         db = root / "fixture.sqlite3"
