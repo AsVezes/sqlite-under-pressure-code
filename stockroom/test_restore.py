@@ -1,0 +1,36 @@
+from contextlib import closing
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+from .backup import capture, digest, verify_bundle
+from .environment import connect
+from .restore import rehearse
+from .test_backup import ready
+from .transfer import Transfer
+from .writer import submit
+
+
+class RestoreTests(unittest.TestCase):
+    def test_restore_cutover_return_and_unacceptable_candidate(self):
+        with TemporaryDirectory() as t:
+            root = Path(t)
+            path = ready(root)
+            bundle = Path(capture(path, root)["bundle"])
+            submit(path, Transfer("later", "item-bolt", "loc-north", "loc-south", 1))
+            result = rehearse(path, bundle, root)
+            self.assertEqual(result["returned_to"], str(path))
+            self.assertEqual(result["rpo_operations"], 1)
+            self.assertGreater(result["rto_ns"], 0)
+            candidate = bundle / "ledger.db"
+            with closing(connect(candidate)) as db:
+                db.execute("UPDATE stock_balance SET quantity=quantity+1 WHERE item_id='item-bolt'")
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                verify_bundle(bundle)
+            manifest = bundle / "manifest.json"
+            data = json.loads(manifest.read_text())
+            data["sha256"] = digest(candidate)
+            manifest.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, "ledger reconciliation failed"):
+                rehearse(path, bundle, root)
