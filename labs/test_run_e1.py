@@ -11,6 +11,16 @@ import run_e1
 
 
 class RunnerSupervisionTests(unittest.TestCase):
+    def test_e1_manifest_covers_wal_visibility_and_contention(self):
+        self.assertEqual(
+            run_e1.PILOTS,
+            ("l05_atomicity", "l09_wal_views", "l10_writer_busy", "l11_stale_snapshot"),
+        )
+        for name in run_e1.PILOTS:
+            with self.subTest(lab=name):
+                self.assertTrue((run_e1.ROOT / (name + ".py")).is_file())
+                self.assertTrue((run_e1.ROOT / ("test_" + name + ".py")).is_file())
+
     def test_success_requires_both_child_exit_codes_zero(self):
         completed = subprocess.CompletedProcess(["python"], 0, stdout="{}", stderr="")
         with patch.object(run_e1.subprocess, "run", return_value=completed) as call:
