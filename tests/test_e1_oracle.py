@@ -71,6 +71,16 @@ class E1OracleTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("O1_CONSERVATION:item-bolt", result["errors"])
 
+    def test_nonnumeric_quantity_is_rejected_without_traceback(self):
+        # Non-STRICT SQLite permits TEXT in INTEGER-affinity columns and the
+        # simple CHECK(quantity >= 0) does not reject every TEXT value.
+        self.sql("""UPDATE stock_balance SET quantity = 'abc'
+                    WHERE item_id = 'item-bolt'
+                    AND location_id = 'loc-north';""")
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_NONINTEGER_QUANTITY", result["errors"])
+
     def test_completed_transfer_and_two_journal_entries_pass(self):
         self.sql("""
             BEGIN;
