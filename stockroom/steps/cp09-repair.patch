@@ -1,0 +1,114 @@
+diff --git a/stockroom/backup.py b/stockroom/backup.py
+index 39e1e989bc68c3ad2fa768d57453c52a1910b031..e18e3df87996f2bb7699241aaf33c06f3d39691b 100644
+--- a/stockroom/backup.py
++++ b/stockroom/backup.py
+@@ -8,10 +8,12 @@ from tempfile import TemporaryDirectory
+ from time import monotonic, time_ns
+ from uuid import uuid4
+ 
++from tools.e1 import inspect_connection
++
+ from .environment import connect
+-from .ledger import check_ledger, require_ledger
++from .ledger import require_ledger
+ from .operation import execute, parser
+-from .writer import watermark
++from .writer import require_receipt_trigger, watermark
+ 
+ 
+ def digest(path):
+@@ -29,9 +31,10 @@ def validate(path):
+             raise ValueError("structural integrity check failed")
+         if db.execute("PRAGMA foreign_key_check").fetchall():
+             raise ValueError("foreign key check failed")
++        require_receipt_trigger(db)
+         state["watermark"] = watermark(db)
+         state["source_id"] = db.execute("SELECT sqlite_source_id()").fetchone()[0]
+-    state["ledger"] = check_ledger(path)
++        state["ledger"] = inspect_connection(db)
+     if not state["ledger"]["ok"]:
+         raise ValueError("ledger reconciliation failed")
+     return state
+diff --git a/stockroom/test_backup.py b/stockroom/test_backup.py
+index 0d01c9094b2c67d93e220ca639748e75169e7707..cc900ce4c54d134598e7e1b3667d9708ec9dfde9 100644
+--- a/stockroom/test_backup.py
++++ b/stockroom/test_backup.py
+@@ -45,3 +45,16 @@ class BackupTests(unittest.TestCase):
+                 capture(path, root, progress=fail)
+             self.assertEqual(latest(root, manifest["workspace_id"]), good)
+             self.assertEqual(list(root.glob(".stockroom-stage-*")), [])
++
++    def test_receipt_trigger_missing_or_inert_refuses_publication(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            path = ready(root)
++            with closing(connect(path)) as db:
++                db.execute("DROP TRIGGER record_transfer_receipt")
++                with self.assertRaisesRegex(ValueError, "receipt trigger"):
++                    capture(path, root)
++                db.execute("CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer BEGIN SELECT 1; END")
++            with self.assertRaisesRegex(ValueError, "receipt trigger"):
++                capture(path, root)
++            self.assertEqual(list(root.glob("stockroom-backup-*")), [])
+diff --git a/stockroom/writer.py b/stockroom/writer.py
+index 670314106d80d102fee6f46578f590b601bfeb8d..401e40d634d82adc6f17b4653173f766455b78b6 100644
+--- a/stockroom/writer.py
++++ b/stockroom/writer.py
+@@ -12,18 +12,30 @@ from .operation import execute, parser
+ from .transfer import Transfer, apply_in_transaction
+ 
+ 
++RECEIPT_TRIGGER = """CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer
++BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END"""
++
++
++def require_receipt_trigger(db):
++    row = db.execute(
++        "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='record_transfer_receipt'"
++    ).fetchone()
++    if row is None or row[0].split() != RECEIPT_TRIGGER.split():
++        raise ValueError("receipt trigger is missing or differs from the Stockroom definition")
++
++
+ def install(path):
+     with closing(connect(path)) as db, write_transaction(db):
+         require_ledger(db)
+-        db.executescript("""
++        db.executescript(f"""
+             CREATE TABLE IF NOT EXISTS receipt(
+               seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
+             ) STRICT;
+             INSERT INTO receipt(transfer_id)
+               SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid;
+-            CREATE TRIGGER IF NOT EXISTS record_transfer_receipt AFTER INSERT ON transfer
+-            BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END;
++            {RECEIPT_TRIGGER.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1)};
+         """)
++        require_receipt_trigger(db)
+         return {"receipt_count": watermark(db)}
+ 
+ 
+@@ -36,6 +48,13 @@ def watermark(db):
+     return maximum
+ 
+ 
++def receipt_for(db, transfer_id):
++    row = db.execute("SELECT seq FROM receipt WHERE transfer_id=?", (transfer_id,)).fetchone()
++    if row is None:
++        raise ValueError("transfer did not produce a receipt")
++    return row[0]
++
++
+ def submit(path, request, wait_ms=500):
+     if type(wait_ms) is not int or not 0 <= wait_ms <= 60_000:
+         raise ValueError("wait-ms must be an integer from 0 to 60000")
+@@ -57,8 +76,7 @@ def submit(path, request, wait_ms=500):
+                         sequence = prior[4]
+                     else:
+                         apply_in_transaction(db, request)
+-                        sequence = db.execute("SELECT seq FROM receipt WHERE transfer_id=?",
+-                                              (request.id,)).fetchone()[0]
++                        sequence = receipt_for(db, request.id)
+             return {"id": request.id, "receipt": sequence, "replayed": prior is not None,
+                     "events": events}
+         except sqlite3.OperationalError as exc:

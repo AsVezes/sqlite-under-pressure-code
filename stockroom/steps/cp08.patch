@@ -1,0 +1,612 @@
+diff --git a/stockroom/ledger.py b/stockroom/ledger.py
+index a35f625a00d87fc237017460b3e75a3925121fa0..d29f334a8c8dd8d147fc4fd20e578bf43eb8b692 100644
+--- a/stockroom/ledger.py
++++ b/stockroom/ledger.py
+@@ -50,6 +50,13 @@ def require_version(db: sqlite3.Connection, version: int) -> dict:
+     return details
+ 
+ 
++def require_ledger(db: sqlite3.Connection) -> dict:
++    details = identity(db)
++    if details["schema_version"] not in (1, 2):
++        raise ValueError(f"Unsupported Stockroom Ledger schema v{details['schema_version']}")
++    return details
++
++
+ def seed_f1(db: sqlite3.Connection) -> None:
+     # Load the shared pilot in memory and copy just its stable opening data.
+     # Application DDL and constraints come from schema_v1.sql.
+@@ -85,5 +92,5 @@ def initialize_ledger(path: Path) -> dict:
+ 
+ def check_ledger(path: Path) -> dict:
+     with closing(connect(path, read_only=True)) as db:
+-        require_version(db, 1)
++        require_ledger(db)
+     return e1.inspect(path)
+diff --git a/stockroom/migrate.py b/stockroom/migrate.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9b1a4981a62d2f33293e74cadd8e2d12478ea16
+--- /dev/null
++++ b/stockroom/migrate.py
+@@ -0,0 +1,136 @@
++"""CP08: stage canonical codes in restartable batches, then rebuild location atomically."""
++from contextlib import closing
++import hashlib
++import json
++
++from fixtures.f3_preflight import canonical
++
++from tools.e1 import inspect_connection
++
++from .environment import connect
++from .ledger import require_version, write_transaction
++from .operation import execute, parser
++from .writer import watermark
++
++
++def normalized(db):
++    rows = db.execute("SELECT id,code FROM location ORDER BY id").fetchall()
++    result, codes = [], set()
++    for location_id, old in rows:
++        new = canonical(old)
++        if new is None:
++            raise ValueError(f"invalid location code at {location_id}")
++        if new in codes:
++            raise ValueError(f"canonical location collision: {new}")
++        codes.add(new)
++        result.append((location_id, old, new))
++    return result
++
++
++def fingerprint(rows):
++    return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
++
++
++def quote(name):
++    return '"' + name.replace('"', '""') + '"'
++
++
++def rebuild(db):
++    dependents = db.execute("""
++        SELECT type,name,sql FROM sqlite_schema
++        WHERE sql IS NOT NULL AND (type IN ('view','trigger')
++                                   OR (type='index' AND tbl_name='location'))
++        ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END, name
++    """).fetchall()
++    for kind, name, _ in dependents:
++        db.execute(f"DROP {kind.upper()} {quote(name)}")
++    db.execute("""
++        CREATE TABLE location_next (
++          id ANY NOT NULL PRIMARY KEY CHECK (
++            typeof(id)='text' AND instr(id,char(0))=0
++            AND id GLOB '[A-Za-z0-9]*' AND id NOT GLOB '*[^A-Za-z0-9._-]*'
++          ),
++          code TEXT NOT NULL UNIQUE CHECK (
++            length(code)>0 AND instr(code,char(0))=0 AND code NOT GLOB '*[^A-Z0-9-]*'
++          ),
++          code_history TEXT NOT NULL
++        ) STRICT
++    """)
++    db.execute("INSERT INTO location_next SELECT id,canonical_code,old_code FROM location_stage")
++    db.execute("DROP TABLE location")
++    db.execute("ALTER TABLE location_next RENAME TO location")
++    for kind, _, sql in reversed(dependents):
++        db.execute(sql)
++    for kind, name, _ in dependents:
++        if kind == "view":
++            db.execute(f"SELECT * FROM {quote(name)} LIMIT 0")
++    if db.execute("PRAGMA foreign_key_check").fetchall():
++        raise ValueError("foreign keys invalid after rebuild")
++    if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
++        raise ValueError("integrity check failed after rebuild")
++    db.execute("DROP TABLE location_stage")
++    db.execute("DROP TABLE location_migration")
++    db.execute("PRAGMA user_version=2")
++
++
++def step(path, batch_size=1, *, interrupt=None):
++    if type(batch_size) is not int or not 1 <= batch_size <= 10_000:
++        raise ValueError("batch size must be 1 to 10000")
++    with closing(connect(path)) as db:
++        # The rebuild briefly removes the parent table. Verify every FK before commit.
++        db.execute("PRAGMA foreign_keys=OFF")
++        with write_transaction(db):
++            require_version(db, 1)
++            before = watermark(db)
++            rows = normalized(db)
++            source_digest = fingerprint(rows)
++            db.executescript("""
++                CREATE TABLE IF NOT EXISTS location_migration(
++                  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
++                  digest TEXT NOT NULL, cursor INTEGER NOT NULL
++                ) STRICT;
++                CREATE TABLE IF NOT EXISTS location_stage(
++                  id ANY NOT NULL PRIMARY KEY, old_code TEXT NOT NULL, canonical_code TEXT NOT NULL UNIQUE
++                ) STRICT;
++            """)
++            db.execute("INSERT OR IGNORE INTO location_migration VALUES(1,?,0)", (source_digest,))
++            digest, cursor = db.execute("SELECT digest,cursor FROM location_migration").fetchone()
++            if digest != source_digest:
++                raise ValueError("location input changed during migration")
++            if not 0 <= cursor <= len(rows):
++                raise ValueError("invalid migration cursor")
++            if db.execute("SELECT id,old_code,canonical_code FROM location_stage ORDER BY id").fetchall() != rows[:cursor]:
++                raise ValueError("staged location data or cursor invalid")
++            if cursor < len(rows):
++                batch = rows[cursor:cursor + batch_size]
++                db.executemany("INSERT INTO location_stage VALUES(?,?,?)", batch)
++                cursor += len(batch)
++                db.execute("UPDATE location_migration SET cursor=? WHERE singleton=1", (cursor,))
++                if interrupt:
++                    interrupt("batch")
++                return {"status": "staged", "cursor": cursor, "total": len(rows), "schema": 1}
++            before_ledger = inspect_connection(db)
++            if not before_ledger["ok"]:
++                raise ValueError(f"source ledger fails O1: {before_ledger['errors']}")
++            rebuild(db)
++            locations = db.execute("SELECT id,code_history,code FROM location ORDER BY id").fetchall()
++            if locations != rows:
++                raise ValueError("rebuilt location codes differ from the staged mapping")
++            if inspect_connection(db) != before_ledger:
++                raise ValueError("rebuilt ledger differs from the validated source")
++            if watermark(db) != before:
++                raise ValueError("receipt boundary changed during rebuild")
++            if interrupt:
++                interrupt("rebuild")
++        return {"status": "migrated", "cursor": cursor, "total": len(rows), "schema": 2}
++
++
++def main():
++    args = parser(__doc__)
++    args.add_argument("--batch-size", type=int, default=1)
++    options = args.parse_args()
++    return execute(lambda: step(options.database, options.batch_size))
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/stockroom/observe.py b/stockroom/observe.py
+index e553d1a356a894ac5f4958c044711139a872e687..d598cdd6fcb82c3f158e9569644336bb14463bb1 100644
+--- a/stockroom/observe.py
++++ b/stockroom/observe.py
+@@ -3,7 +3,7 @@ from contextlib import closing
+ from time import monotonic_ns
+ 
+ from .environment import connect
+-from .ledger import require_version
++from .ledger import require_ledger
+ from .operation import execute, parser
+ from .storage import current
+ 
+@@ -20,7 +20,7 @@ def event(events, phase, error=None):
+ 
+ def observe(path):
+     with closing(connect(path)) as db:
+-        require_version(db, 1)
++        require_ledger(db)
+         state = current(db)
+         busy, frames, backfilled = db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+         return {"profile": state, "checkpoint": {
+diff --git a/stockroom/report.py b/stockroom/report.py
+index b910022cae9f3a321cfcff2bb2a4fd17d1777f5b..b77ef1a1bda9ecfd751388679f03907192c3ab90 100644
+--- a/stockroom/report.py
++++ b/stockroom/report.py
+@@ -6,7 +6,7 @@ from statistics import median
+ from time import perf_counter_ns
+ 
+ from .environment import connect
+-from .ledger import require_version
++from .ledger import require_ledger
+ from .operation import execute, parser
+ 
+ QUERY = (
+@@ -21,7 +21,7 @@ def measure(path, item, repeats=1):
+         raise ValueError("repeats must be between 1 and 100")
+     with closing(connect(path, read_only=True)) as db:
+         db.execute("BEGIN")
+-        require_version(db, 1)
++        require_ledger(db)
+         samples = []
+         rows = None
+         for _ in range(repeats):
+diff --git a/stockroom/storage.py b/stockroom/storage.py
+index 8689944cedfbaa37722a9d03accabc46d49c705a..d4d8d0aa4ad0852c32fe9e61c17374043ea96528 100644
+--- a/stockroom/storage.py
++++ b/stockroom/storage.py
+@@ -2,7 +2,7 @@
+ from contextlib import closing
+ 
+ from .environment import connect
+-from .ledger import require_version
++from .ledger import require_ledger
+ from .operation import execute, parser
+ 
+ 
+@@ -14,7 +14,7 @@ def current(db):
+ 
+ def profile(path, journal=None):
+     with closing(connect(path)) as db:
+-        require_version(db, 1)
++        require_ledger(db)
+         if journal is not None:
+             if journal not in ("delete", "wal"):
+                 raise ValueError("expected delete or wal")
+diff --git a/stockroom/test_migrate.py b/stockroom/test_migrate.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..feb285328a1e65b08fb1d688fd0586b7da96bfe9
+--- /dev/null
++++ b/stockroom/test_migrate.py
+@@ -0,0 +1,78 @@
++from contextlib import closing
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++
++from .environment import connect, initialize_workspace
++from .ledger import check_ledger, initialize_ledger
++from .migrate import step
++from .report import measure
++from .transfer import Transfer
++from .writer import install, submit
++
++
++class MigrationTests(unittest.TestCase):
++    def setUp(self):
++        d = TemporaryDirectory()
++        self.addCleanup(d.cleanup)
++        self.path = Path(initialize_workspace(Path(d.name))["database"])
++        initialize_ledger(self.path)
++        install(self.path)
++        submit(self.path, Transfer("old", "item-bolt", "loc-north", "loc-south", 3))
++
++    def test_batch_and_rebuild_rollback_then_compatible_dependencies(self):
++        with closing(connect(self.path)) as db:
++            db.executescript("""
++                CREATE TABLE location_log(id TEXT);
++                CREATE VIEW location_view AS SELECT id,code FROM location;
++                CREATE TRIGGER location_logger AFTER UPDATE ON location
++                BEGIN INSERT INTO location_log VALUES(new.id); END;
++            """)
++        def fail(phase):
++            raise RuntimeError(phase)
++        with self.assertRaisesRegex(RuntimeError, "batch"):
++            step(self.path, interrupt=fail)
++        self.assertEqual(step(self.path)["cursor"], 1)
++        self.assertEqual(step(self.path)["cursor"], 2)
++        before = measure(self.path, "item-bolt")["sha256"]
++        with self.assertRaisesRegex(RuntimeError, "rebuild"):
++            step(self.path, interrupt=fail)
++        with closing(connect(self.path)) as db:
++            self.assertEqual(db.execute("PRAGMA user_version").fetchone(), (1,))
++            self.assertEqual(db.execute("SELECT code FROM location_view WHERE id='loc-north'").fetchone(), (" North ",))
++        self.assertEqual(step(self.path)["schema"], 2)
++        self.assertEqual(measure(self.path, "item-bolt")["sha256"], before)
++        with closing(connect(self.path)) as db:
++            self.assertEqual(db.execute("SELECT code,code_history FROM location WHERE id='loc-north'").fetchone(), ("NORTH", " North "))
++            db.execute("UPDATE location SET code='NORTH-2' WHERE id='loc-north'")
++            self.assertEqual(db.execute("SELECT * FROM location_log").fetchone(), ("loc-north",))
++            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
++        self.assertEqual(submit(self.path, Transfer("new", "item-bolt", "loc-south", "loc-north", 1))["receipt"], 2)
++        self.assertTrue(check_ledger(self.path)["ok"])
++
++    def test_changed_input_and_collision_refuse_before_promotion(self):
++        step(self.path)
++        with closing(connect(self.path)) as db:
++            db.execute("UPDATE location SET code='North' WHERE id='loc-south'")
++        with self.assertRaisesRegex(ValueError, "collision"):
++            step(self.path)
++        with closing(connect(self.path)) as db:
++            db.execute("UPDATE location SET code='Other' WHERE id='loc-south'")
++        with self.assertRaisesRegex(ValueError, "input changed"):
++            step(self.path)
++        with closing(connect(self.path)) as db:
++            self.assertEqual(db.execute("PRAGMA user_version").fetchone(), (1,))
++            db.execute("PRAGMA user_version=999")
++        with self.assertRaisesRegex(ValueError, "v999"):
++            step(self.path)
++
++    def test_o1_failure_keeps_v1_and_staged_rows(self):
++        step(self.path, 2)
++        with closing(connect(self.path)) as db:
++            db.execute("UPDATE stock_balance SET quantity=quantity+1 WHERE location_id='loc-north'")
++            self.assertEqual(db.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
++        with self.assertRaisesRegex(ValueError, "source ledger fails O1"):
++            step(self.path, 2)
++        with closing(connect(self.path, read_only=True)) as db:
++            self.assertEqual(db.execute("PRAGMA user_version").fetchone(), (1,))
++            self.assertEqual(db.execute("SELECT count(*) FROM location_stage").fetchone(), (2,))
+diff --git a/stockroom/transfer.py b/stockroom/transfer.py
+index fe360abc6a6078c4207368df88d491b4d0b966ea..6c9d1019ab968b374cb4406ce5dbc4f8190db980 100644
+--- a/stockroom/transfer.py
++++ b/stockroom/transfer.py
+@@ -7,7 +7,7 @@ import re
+ import sqlite3
+ 
+ from .environment import connect
+-from .ledger import require_version, write_transaction
++from .ledger import require_ledger, write_transaction
+ 
+ 
+ MAX_TRANSFER = 1_000_000_000
+@@ -40,7 +40,7 @@ def apply_in_transaction(
+     """Apply one transfer within a caller-owned write transaction using a savepoint."""
+     if not db.in_transaction or db.execute("PRAGMA foreign_keys").fetchone() != (1,):
+         raise ValueError("Transfer requires an active transaction with foreign keys enabled")
+-    require_version(db, 1)
++    require_ledger(db)
+     db.execute("SAVEPOINT stockroom_transfer")
+     try:
+         db.execute(
+diff --git a/stockroom/tune.py b/stockroom/tune.py
+index 0b3cea1d99ccd83282beede3b440647d6ad4310f..647e73bde17fff3385569f6094046912f915aeb0 100644
+--- a/stockroom/tune.py
++++ b/stockroom/tune.py
+@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
+ from time import perf_counter_ns
+ 
+ from .environment import connect
+-from .ledger import check_ledger, require_version, write_transaction
++from .ledger import check_ledger, require_ledger, write_transaction
+ from .operation import execute, parser
+ from .report import measure
+ from .transfer import Transfer
+@@ -24,7 +24,7 @@ def copy_database(source, destination):
+ def index(path, enabled):
+     with closing(connect(path)) as db:
+         with write_transaction(db):
+-            require_version(db, 1)
++            require_ledger(db)
+             if enabled:
+                 db.execute(f"CREATE INDEX IF NOT EXISTS {INDEX} "
+                            "ON transfer(item_id,destination_location_id,id)")
+diff --git a/stockroom/writer.py b/stockroom/writer.py
+index 070869ecf5d5b863116b81623947125bab39178c..670314106d80d102fee6f46578f590b601bfeb8d 100644
+--- a/stockroom/writer.py
++++ b/stockroom/writer.py
+@@ -6,7 +6,7 @@ import sqlite3
+ from time import monotonic, sleep
+ 
+ from .environment import connect
+-from .ledger import require_version, write_transaction
++from .ledger import require_ledger, write_transaction
+ from .observe import event
+ from .operation import execute, parser
+ from .transfer import Transfer, apply_in_transaction
+@@ -14,7 +14,7 @@ from .transfer import Transfer, apply_in_transaction
+ 
+ def install(path):
+     with closing(connect(path)) as db, write_transaction(db):
+-        require_version(db, 1)
++        require_ledger(db)
+         db.executescript("""
+             CREATE TABLE IF NOT EXISTS receipt(
+               seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
+@@ -45,7 +45,7 @@ def submit(path, request, wait_ms=500):
+         try:
+             with closing(connect(path, timeout=0)) as db:
+                 with write_transaction(db, lambda phase, error=None: event(events, phase, error)):
+-                    require_version(db, 1)
++                    require_ledger(db)
+                     prior = db.execute(
+                         "SELECT t.item_id,t.source_location_id,t.destination_location_id,t.quantity,r.seq "
+                         "FROM transfer t JOIN receipt r ON r.transfer_id=t.id WHERE t.id=?", (request.id,)
+diff --git a/tools/e1.py b/tools/e1.py
+index a98a7d134b33bc208274d85e07b8b4b8bfc8a43e..e5ada006760b9f2e56c66110a8f3c79319075534 100644
+--- a/tools/e1.py
++++ b/tools/e1.py
+@@ -62,111 +62,116 @@ def inspect(path: Path) -> dict:
+         # In WAL mode a writer may commit between SELECTs; without BEGIN the
+         # oracle could combine balances and journal from different commits.
+         connection.execute("BEGIN")
+-        errors = []
+-        integrity = [r[0] for r in connection.execute("PRAGMA quick_check")]
+-        if integrity != ["ok"]:
+-            errors.append("O1_STRUCTURAL_CHECK")
+-        if list(connection.execute("PRAGMA foreign_key_check")):
+-            errors.append("O1_FOREIGN_KEY")
+-        opening = {
+-            (item, location): quantity
+-            for item, location, quantity in connection.execute(
+-                "SELECT item_id, location_id, quantity FROM opening_balance"
+-            )
+-        }
+-        balances = {
+-            (item, location): quantity
+-            for item, location, quantity in connection.execute(
+-                "SELECT item_id, location_id, quantity FROM stock_balance"
+-            )
+-        }
+-        transfers = list(connection.execute(
+-            "SELECT id, item_id, source_location_id, "
+-            "destination_location_id, quantity FROM transfer ORDER BY id"
+-        ))
+-        journal = list(connection.execute(
+-            "SELECT transfer_id, item_id, location_id, delta "
+-            "FROM journal_entry ORDER BY transfer_id, id"
+-        ))
+-        # SQLite's INTEGER affinity and CHECK(quantity >= 0) can still store
+-        # nonnumeric TEXT. Never allow Python arithmetic or comparisons to
+-        # misclassify such rows or turn an oracle failure into a traceback.
+-        quantities = (
+-            list(opening.values())
+-            + list(balances.values())
+-            + [row[4] for row in transfers]
+-            + [row[3] for row in journal]
++        return inspect_connection(connection)
++    finally:
++        connection.close()
++
++
++def inspect_connection(connection: sqlite3.Connection) -> dict:
++    """Run O1 on an existing snapshot without taking ownership of it."""
++    errors = []
++    integrity = [r[0] for r in connection.execute("PRAGMA quick_check")]
++    if integrity != ["ok"]:
++        errors.append("O1_STRUCTURAL_CHECK")
++    if list(connection.execute("PRAGMA foreign_key_check")):
++        errors.append("O1_FOREIGN_KEY")
++    opening = {
++        (item, location): quantity
++        for item, location, quantity in connection.execute(
++            "SELECT item_id, location_id, quantity FROM opening_balance"
++        )
++    }
++    balances = {
++        (item, location): quantity
++        for item, location, quantity in connection.execute(
++            "SELECT item_id, location_id, quantity FROM stock_balance"
+         )
+-        if any(type(quantity) is not int for quantity in quantities):
+-            errors.append("O1_NONINTEGER_QUANTITY")
+-            return {
+-                "oracle": "O1",
+-                "ok": False,
+-                "errors": sorted(set(errors)),
+-                "balances": [],
+-                "transfers": len(transfers),
+-                "journal_entries": len(journal),
+-            }
+-        # A damaged or externally edited database can bypass CHECK constraints.
+-        # Matching negative opening/current balances must never pass O1.
+-        if any(quantity < 0 for quantity in opening.values()) or any(
+-            quantity < 0 for quantity in balances.values()
+-        ):
+-            errors.append("O1_NEGATIVE_QUANTITY")
+-        entries_by_transfer = {}
+-        deltas = {}
+-        for transfer_id, item, location, delta in journal:
+-            entries_by_transfer.setdefault(transfer_id, []).append(
+-                (item, location, delta)
+-            )
+-            key = (item, location)
+-            deltas[key] = deltas.get(key, 0) + delta
+-
+-        if set(opening) != set(balances):
+-            errors.append("O1_POSITION_SET")
+-        for key in sorted(set(opening) | set(balances) | set(deltas)):
+-            expected = opening.get(key, 0) + deltas.get(key, 0)
+-            actual = balances.get(key)
+-            if actual is None or actual < 0 or actual != expected:
+-                errors.append("O1_BALANCE_MISMATCH:" + ":".join(key))
+-
+-        transfer_ids = set()
+-        for transfer_id, item, source, destination, quantity in transfers:
+-            transfer_ids.add(transfer_id)
+-            # CHECK constraints can be bypassed by an external connection.
+-            # A self-transfer or nonpositive amount must never pass O1 merely
+-            # because its journal and projected balances reconcile.
+-            if not transfer_id.strip() or source == destination or not 1 <= quantity <= 1000000000:
+-                errors.append("O1_INVALID_TRANSFER:" + transfer_id)
+-            expected = sorted([
+-                (item, source, -quantity),
+-                (item, destination, quantity),
+-            ])
+-            if sorted(entries_by_transfer.get(transfer_id, [])) != expected:
+-                errors.append("O1_JOURNAL_PAIR:" + transfer_id)
+-        for transfer_id in sorted(set(entries_by_transfer) - transfer_ids):
+-            errors.append("O1_ORPHAN_JOURNAL:" + transfer_id)
+-
+-        for item in sorted({key[0] for key in set(opening) | set(balances)}):
+-            before = sum(qty for (i, _), qty in opening.items() if i == item)
+-            after = sum(qty for (i, _), qty in balances.items() if i == item)
+-            if before != after:
+-                errors.append("O1_CONSERVATION:" + item)
+-
+-        errors = sorted(set(errors))
++    }
++    transfers = list(connection.execute(
++        "SELECT id, item_id, source_location_id, "
++        "destination_location_id, quantity FROM transfer ORDER BY id"
++    ))
++    journal = list(connection.execute(
++        "SELECT transfer_id, item_id, location_id, delta "
++        "FROM journal_entry ORDER BY transfer_id, id"
++    ))
++    # SQLite's INTEGER affinity and CHECK(quantity >= 0) can still store
++    # nonnumeric TEXT. Never allow Python arithmetic or comparisons to
++    # misclassify such rows or turn an oracle failure into a traceback.
++    quantities = (
++        list(opening.values())
++        + list(balances.values())
++        + [row[4] for row in transfers]
++        + [row[3] for row in journal]
++    )
++    if any(type(quantity) is not int for quantity in quantities):
++        errors.append("O1_NONINTEGER_QUANTITY")
+         return {
+             "oracle": "O1",
+-            "ok": not errors,
+-            "errors": errors,
+-            "balances": [
+-                {"item_id": item, "location_id": location, "quantity": qty}
+-                for (item, location), qty in sorted(balances.items())
+-            ],
++            "ok": False,
++            "errors": sorted(set(errors)),
++            "balances": [],
+             "transfers": len(transfers),
+             "journal_entries": len(journal),
+         }
+-    finally:
+-        connection.close()
++    # A damaged or externally edited database can bypass CHECK constraints.
++    # Matching negative opening/current balances must never pass O1.
++    if any(quantity < 0 for quantity in opening.values()) or any(
++        quantity < 0 for quantity in balances.values()
++    ):
++        errors.append("O1_NEGATIVE_QUANTITY")
++    entries_by_transfer = {}
++    deltas = {}
++    for transfer_id, item, location, delta in journal:
++        entries_by_transfer.setdefault(transfer_id, []).append(
++            (item, location, delta)
++        )
++        key = (item, location)
++        deltas[key] = deltas.get(key, 0) + delta
++
++    if set(opening) != set(balances):
++        errors.append("O1_POSITION_SET")
++    for key in sorted(set(opening) | set(balances) | set(deltas)):
++        expected = opening.get(key, 0) + deltas.get(key, 0)
++        actual = balances.get(key)
++        if actual is None or actual < 0 or actual != expected:
++            errors.append("O1_BALANCE_MISMATCH:" + ":".join(key))
++
++    transfer_ids = set()
++    for transfer_id, item, source, destination, quantity in transfers:
++        transfer_ids.add(transfer_id)
++        # CHECK constraints can be bypassed by an external connection.
++        # A self-transfer or nonpositive amount must never pass O1 merely
++        # because its journal and projected balances reconcile.
++        if not transfer_id.strip() or source == destination or not 1 <= quantity <= 1000000000:
++            errors.append("O1_INVALID_TRANSFER:" + transfer_id)
++        expected = sorted([
++            (item, source, -quantity),
++            (item, destination, quantity),
++        ])
++        if sorted(entries_by_transfer.get(transfer_id, [])) != expected:
++            errors.append("O1_JOURNAL_PAIR:" + transfer_id)
++    for transfer_id in sorted(set(entries_by_transfer) - transfer_ids):
++        errors.append("O1_ORPHAN_JOURNAL:" + transfer_id)
++
++    for item in sorted({key[0] for key in set(opening) | set(balances)}):
++        before = sum(qty for (i, _), qty in opening.items() if i == item)
++        after = sum(qty for (i, _), qty in balances.items() if i == item)
++        if before != after:
++            errors.append("O1_CONSERVATION:" + item)
++
++    errors = sorted(set(errors))
++    return {
++        "oracle": "O1",
++        "ok": not errors,
++        "errors": errors,
++        "balances": [
++            {"item_id": item, "location_id": location, "quantity": qty}
++            for (item, location), qty in sorted(balances.items())
++        ],
++        "transfers": len(transfers),
++        "journal_entries": len(journal),
++    }
+ 
+ 
+ def main() -> int:

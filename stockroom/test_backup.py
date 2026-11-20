@@ -45,3 +45,16 @@ class BackupTests(unittest.TestCase):
                 capture(path, root, progress=fail)
             self.assertEqual(latest(root, manifest["workspace_id"]), good)
             self.assertEqual(list(root.glob(".stockroom-stage-*")), [])
+
+    def test_receipt_trigger_missing_or_inert_refuses_publication(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = ready(root)
+            with closing(connect(path)) as db:
+                db.execute("DROP TRIGGER record_transfer_receipt")
+                with self.assertRaisesRegex(ValueError, "receipt trigger"):
+                    capture(path, root)
+                db.execute("CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer BEGIN SELECT 1; END")
+            with self.assertRaisesRegex(ValueError, "receipt trigger"):
+                capture(path, root)
+            self.assertEqual(list(root.glob("stockroom-backup-*")), [])

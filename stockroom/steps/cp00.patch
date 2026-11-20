@@ -1,0 +1,235 @@
+diff --git a/stockroom/README.md b/stockroom/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..93048d6f16e927392a2905734e00e46ccc3e375d
+--- /dev/null
++++ b/stockroom/README.md
+@@ -0,0 +1,16 @@
++# Stockroom Ledger
++
++The cumulative teaching project uses Python 3.12 or later and its standard-library SQLite binding. Run the commands from the repository root. Use the standalone SQLite CLI for the book's shell exercises.
++
++## CP00 · Identify the runtime and open the same workspace twice
++
++```sh
++python3 -m stockroom doctor
++python3 -m stockroom workspace
++python3 -m stockroom identity "/absolute/path/to/stockroom ledger.sqlite3"
++python3 -m unittest discover -s stockroom -t . -v
++```
++
++Use the exact database path returned by `workspace`. It creates a new directory each time. The second connection reports the same workspace ID, database path and schema version 0. Try a path in a different directory to see the refusal without creating a second database. The `doctor` output identifies the shell and Python's embedded SQLite separately.
++
++This development checkpoint requires execution and independent review before acceptance.
+diff --git a/stockroom/__init__.py b/stockroom/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..58ece221e14194a52607c2635963280bc064a19f
+--- /dev/null
++++ b/stockroom/__init__.py
+@@ -0,0 +1 @@
++"""Stockroom Ledger teaching application."""
+diff --git a/stockroom/__main__.py b/stockroom/__main__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c128271357aa0f58326f1cf0a0d425373812f31
+--- /dev/null
++++ b/stockroom/__main__.py
+@@ -0,0 +1,35 @@
++"""Command-line entry point for the Stockroom Ledger."""
++
++import argparse
++import json
++from pathlib import Path
++import sqlite3
++
++from .environment import initialize_workspace, inspect_workspace, runtime_profile
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    commands = parser.add_subparsers(dest="command", required=True)
++    commands.add_parser("doctor", help="Identify Python's SQLite and the standalone CLI")
++    workspace = commands.add_parser("workspace", help="Create an exclusive workspace")
++    workspace.add_argument("--parent", type=Path, help="Existing directory for the new workspace")
++    identify = commands.add_parser("identity", help="Identify an existing workspace")
++    identify.add_argument("database", type=Path)
++    args = parser.parse_args()
++
++    try:
++        if args.command == "doctor":
++            result = runtime_profile()
++        elif args.command == "workspace":
++            result = initialize_workspace(args.parent)
++        else:
++            result = inspect_workspace(args.database)
++    except (OSError, sqlite3.Error, ValueError, RuntimeError) as error:
++        parser.exit(2, f"stockroom: {error}\n")
++    print(json.dumps(result, indent=2))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/stockroom/environment.py b/stockroom/environment.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef3b7cd01c77109b5b72f738930b3d3daa90cda7
+--- /dev/null
++++ b/stockroom/environment.py
+@@ -0,0 +1,104 @@
++"""CP00: workspace ownership and separate SQLite runtime identities."""
++
++from contextlib import closing
++import os
++from pathlib import Path
++import shutil
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import uuid
++
++
++DATABASE_NAME = "stockroom ledger.sqlite3"
++APPLICATION_ID = 0x534C4544
++
++
++def connect(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
++    """Open an existing database with SQL-controlled transactions."""
++    if path.is_symlink() or not path.is_file():
++        raise ValueError(f"Expected an existing, regular database file: {path}")
++    mode = "ro" if read_only else "rw"
++    uri = path.resolve(strict=True).as_uri() + "?mode=" + mode
++    db = sqlite3.connect(uri, uri=True, autocommit=True)
++    try:
++        db.execute("PRAGMA foreign_keys=ON")
++        if db.execute("PRAGMA foreign_keys").fetchone() != (1,):
++            raise RuntimeError("SQLite foreign key enforcement is unavailable")
++    except BaseException:
++        db.close()
++        raise
++    return db
++
++
++def identity(db: sqlite3.Connection) -> dict:
++    if db.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
++        raise ValueError("The database is not a Stockroom Ledger workspace")
++    row = db.execute(
++        "SELECT identity FROM workspace_identity WHERE slot=1"
++    ).fetchone()
++    if row is None:
++        raise ValueError("The workspace identity is missing")
++    return {
++        "workspace_id": row[0],
++        "database": db.execute("PRAGMA database_list").fetchone()[2],
++        "schema_version": db.execute("PRAGMA user_version").fetchone()[0],
++    }
++
++
++def initialize_workspace(parent: Path | None = None) -> dict:
++    """Create a new exclusive directory and put one identifiable database in it."""
++    directory = Path(tempfile.mkdtemp(prefix="stockroom-", dir=parent)).resolve()
++    path = directory / DATABASE_NAME
++    try:
++        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
++        os.close(fd)
++        with closing(connect(path)) as db:
++            db.execute("BEGIN IMMEDIATE")
++            db.execute(f"PRAGMA application_id={APPLICATION_ID}")
++            db.execute(
++                "CREATE TABLE workspace_identity("
++                "slot INTEGER PRIMARY KEY CHECK(slot=1), identity TEXT NOT NULL)"
++            )
++            db.execute("INSERT INTO workspace_identity VALUES(1,?)", (str(uuid.uuid4()),))
++            db.execute("COMMIT")
++            return {"workspace": str(directory), **identity(db)}
++    except BaseException:
++        # The directory was created exclusively by this invocation.
++        shutil.rmtree(directory)
++        raise
++
++
++def inspect_workspace(path: Path) -> dict:
++    with closing(connect(path, read_only=True)) as db:
++        return identity(db)
++
++
++def runtime_profile() -> dict:
++    with closing(sqlite3.connect(":memory:", autocommit=True)) as db:
++        lib = {
++            "version": db.execute("SELECT sqlite_version()").fetchone()[0],
++            "source_id": db.execute("SELECT sqlite_source_id()").fetchone()[0],
++            "compile_options": [row[0] for row in db.execute("PRAGMA compile_options")],
++        }
++    cli_path = shutil.which("sqlite3")
++    cli = {"available": False}
++    if cli_path:
++        executable = str(Path(cli_path).resolve())
++        argv = [
++            executable, "-batch", "-bail", "-noheader", "-init", os.devnull,
++            ":memory:", "SELECT sqlite_version(); SELECT sqlite_source_id(); PRAGMA compile_options;",
++        ]
++        try:
++            result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
++            lines = result.stdout.splitlines()
++            if result.returncode == 0 and len(lines) >= 2:
++                cli = {"available": True, "executable": executable, "version": lines[0],
++                       "source_id": lines[1], "compile_options": lines[2:]}
++            else:
++                cli.update(executable=executable, exit_code=result.returncode, error=result.stderr)
++        except (OSError, subprocess.TimeoutExpired) as error:
++            cli.update(executable=executable, error=str(error))
++    return {"python": sys.version, "python_executable": sys.executable,
++            "sqlite_library": lib, "sqlite_cli": cli}
+diff --git a/stockroom/test_environment.py b/stockroom/test_environment.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2269814d5649a7dce06506bdcb75a24219e0533
+--- /dev/null
++++ b/stockroom/test_environment.py
+@@ -0,0 +1,49 @@
++import json
++from pathlib import Path
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++
++from .environment import initialize_workspace, inspect_workspace, runtime_profile
++
++
++class WorkspaceTests(unittest.TestCase):
++    def test_exclusive_workspace_with_spaces_reopened_by_second_process(self):
++        with tempfile.TemporaryDirectory(prefix="stockroom tests ") as directory:
++            parent = Path(directory)
++            first = initialize_workspace(parent)
++            second = initialize_workspace(parent)
++            path = Path(first["database"])
++            self.assertIn(" ", str(path))
++            self.assertNotEqual(first["workspace_id"], second["workspace_id"])
++            p = subprocess.run(
++                [sys.executable, "-m", "stockroom", "identity", str(path)],
++                check=True, capture_output=True, text=True, timeout=10,
++            )
++            self.assertEqual(json.loads(p.stdout), inspect_workspace(path))
++            self.assertEqual(json.loads(p.stdout)["workspace_id"], first["workspace_id"])
++            self.assertEqual(path.parent.parent, parent.resolve())
++
++    def test_missing_path_does_not_create_a_file(self):
++        with tempfile.TemporaryDirectory() as directory:
++            wrong_path = Path(directory) / "wrong working directory" / "stockroom ledger.sqlite3"
++            wrong_path.parent.mkdir()
++            with self.assertRaises(ValueError):
++                inspect_workspace(wrong_path)
++            self.assertFalse(wrong_path.exists())
++
++    def test_foreign_database_refused(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / "foreign.sqlite3"
++            db = sqlite3.connect(path)
++            db.close()
++            with self.assertRaisesRegex(ValueError, "not a Stockroom Ledger"):
++                inspect_workspace(path)
++
++    def test_runtime_identifies_engine_and_reports_cli_separately(self):
++        profile = runtime_profile()
++        self.assertEqual(profile["sqlite_library"]["version"], sqlite3.sqlite_version)
++        self.assertTrue(profile["sqlite_library"]["source_id"])
++        self.assertIsInstance(profile["sqlite_cli"]["available"], bool)

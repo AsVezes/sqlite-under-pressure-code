@@ -8,10 +8,12 @@ from tempfile import TemporaryDirectory
 from time import monotonic, time_ns
 from uuid import uuid4
 
+from tools.e1 import inspect_connection
+
 from .environment import connect
-from .ledger import check_ledger, require_ledger
+from .ledger import require_ledger
 from .operation import execute, parser
-from .writer import watermark
+from .writer import require_receipt_trigger, watermark
 
 
 def digest(path):
@@ -29,9 +31,10 @@ def validate(path):
             raise ValueError("structural integrity check failed")
         if db.execute("PRAGMA foreign_key_check").fetchall():
             raise ValueError("foreign key check failed")
+        require_receipt_trigger(db)
         state["watermark"] = watermark(db)
         state["source_id"] = db.execute("SELECT sqlite_source_id()").fetchone()[0]
-    state["ledger"] = check_ledger(path)
+        state["ledger"] = inspect_connection(db)
     if not state["ledger"]["ok"]:
         raise ValueError("ledger reconciliation failed")
     return state

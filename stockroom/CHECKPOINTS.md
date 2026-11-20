@@ -1,6 +1,6 @@
 # Stockroom Ledger checkpoint snapshots
 
-These immutable commits are the development inputs for CP00–CP02. The SQLite source, CLI profile and full replay are recorded separately during validation.
+These immutable commits record the original CP00–CP02 source snapshots. The SQLite source, CLI profile and full replay are recorded separately during validation.
 
 | Step | Entrance | Output commit | Chapter | Observable state |
 | --- | --- | --- | --- | --- |
@@ -8,13 +8,13 @@ These immutable commits are the development inputs for CP00–CP02. The SQLite s
 | CP01 | CP00 database | [8c468f6](https://github.com/AsVezes/sqlite-under-pressure-code/commit/8c468f602177de7fdaf3061141404019136ee50a) | C03 | Schema v1 in the same file, opening quantities 10/2 and 4/8, no movements, O1 passes. |
 | CP02 | CP01 database | [5292d39](https://github.com/AsVezes/sqlite-under-pressure-code/commit/5292d3944ed2ece7f93327fa93496acfe949f748) | C05 | Moving three bolts leaves 7/5, one transfer and two journal legs. Negative controls preserve the prior state. |
 
-Download or check out each output commit in a separate directory and follow its [command guide](README.md) from the repository root. Keep the database in a separate disposable directory and carry the same absolute path across all three states. At each stage run `python3 -m unittest discover -s stockroom -t . -v`. CP02 also provides the entry points needed to build all three states directly from a fresh workspace.
+For direct entry, download the relevant output commit and follow its [command guide](README.md) from the repository root. Keep the database in a separate disposable directory and carry the same absolute path across all three states. At each stage run `python3 -m unittest discover -s stockroom -t . -v`. CP02 also provides the entry points needed to build all three states directly from a fresh workspace.
 
 These development snapshots require execution and independent review.
 
 ## CP03–CP11 · Continue with the same database
 
-Start from the CP02 database, then extract each snapshot separately and keep its absolute database path. Run the command from that snapshot's repository root.
+Start from the CP02 database and keep its absolute path. Use the build-along below, or use an output snapshot for direct entry. Run the command from that snapshot's repository root.
 
 | Step | Output snapshot | Chapter | Observable task |
 | --- | --- | --- | --- |
@@ -61,5 +61,37 @@ python3 -m stockroom check "$DB"
 
 Use the CP03 WAL profile when timing the regular writer. CP05 retries contention within a wait budget, and replay of the same ID checks the full payload. The migration preserves the original location labels and requires the input rows to stay unchanged between staging calls. The recovery drill creates an exclusive temporary copy of the project ledger, and its selection file belongs to the rehearsal. Run it with other writers paused if comparing a known receipt boundary.
 
-The commands and tests were executed on Linux with Python 3.12.3 and SQLite 3.45.1 from the Python standard library. Platform variants, the official standalone shell, and independent acceptance have their own checks.
+The commands and tests have been exercised on Linux with Python 3.12.3 and SQLite 3.45.1 from the Python standard library. Platform variants, the official standalone shell, and independent acceptance have their own checks.
 
+
+## Build the project in one directory
+
+The original snapshots document how the project evolved. For the build-along,
+download commit [26b6888](https://github.com/AsVezes/sqlite-under-pressure-code/tree/26b6888f3ab74fb47248dfde7a113b2afd78b46d)
+as a ZIP and extract it once. Keep the database and downloaded patches outside
+that source directory. The [steps directory](steps/) contains the exact deltas
+from each input to the next checkpoint, including the corrected CP08–CP10 gates.
+
+From the source root, apply each chapter's numbered patch and run that chapter's
+checks before advancing. For example, at CP00:
+
+```sh
+git apply --check "/absolute/path/to/cp00.patch"
+git apply "/absolute/path/to/cp00.patch"
+python3 -m unittest discover -s stockroom -t . -v
+```
+
+A ZIP checkout does not require `git init`. Inspect the `diff --git` headers and
+the added and removed lines before applying each patch. You can implement the
+listed changes in an editor and use the patch as the exact reference for any
+supporting code. Apply a step once. Follow the chapter's own database commands
+and keep its exit state before moving on. The [tree manifest](steps/trees.json)
+gives the expected source tree after every step.
+
+For direct entry into the historical CP08 snapshot, apply
+[`cp08-repair.patch`](steps/cp08-repair.patch) before running the chapter.
+For CP09, also apply [`cp09-repair.patch`](steps/cp09-repair.patch).
+For CP10 or CP11, apply all three repair patches, ending with
+[`cp10-repair.patch`](steps/cp10-repair.patch). These repair files are for
+direct entry only. The numbered build-along patches already include the
+corresponding repairs.

@@ -65,3 +65,14 @@ class MigrationTests(unittest.TestCase):
             db.execute("PRAGMA user_version=999")
         with self.assertRaisesRegex(ValueError, "v999"):
             step(self.path)
+
+    def test_o1_failure_keeps_v1_and_staged_rows(self):
+        step(self.path, 2)
+        with closing(connect(self.path)) as db:
+            db.execute("UPDATE stock_balance SET quantity=quantity+1 WHERE location_id='loc-north'")
+            self.assertEqual(db.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
+        with self.assertRaisesRegex(ValueError, "source ledger fails O1"):
+            step(self.path, 2)
+        with closing(connect(self.path, read_only=True)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone(), (1,))
+            self.assertEqual(db.execute("SELECT count(*) FROM location_stage").fetchone(), (2,))

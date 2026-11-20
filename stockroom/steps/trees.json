@@ -1,0 +1,74 @@
+[
+  {
+    "checkpoint": 0,
+    "archive_commit": "34a0abc192df4e45bae08343f3cd49debe7de4ac",
+    "input_tree": "8ca7b2a8cd177fa86115273f4450f9d0d33bb07d",
+    "output_tree": "1c2d05a722cce7cb0a6f10ccd17f1e4197bfc67c"
+  },
+  {
+    "checkpoint": 1,
+    "archive_commit": "8c468f602177de7fdaf3061141404019136ee50a",
+    "input_tree": "1c2d05a722cce7cb0a6f10ccd17f1e4197bfc67c",
+    "output_tree": "de2893567f4b87eb1681136aca7a141682253b82"
+  },
+  {
+    "checkpoint": 2,
+    "archive_commit": "5292d3944ed2ece7f93327fa93496acfe949f748",
+    "input_tree": "de2893567f4b87eb1681136aca7a141682253b82",
+    "output_tree": "0691b2424de22d0b04993bf8fd77fe48e2d6770d"
+  },
+  {
+    "checkpoint": 3,
+    "archive_commit": "124e8d093b8c5d393a565c1422de42aae07c7949",
+    "input_tree": "0691b2424de22d0b04993bf8fd77fe48e2d6770d",
+    "output_tree": "5e54a6886ac94007e241f170febf2153a9c67d5c"
+  },
+  {
+    "checkpoint": 4,
+    "archive_commit": "73c704f740739f845537b2959a7aa2c567f50122",
+    "input_tree": "5e54a6886ac94007e241f170febf2153a9c67d5c",
+    "output_tree": "5f7e8fed9a681a435a8055b7cd218bbfe2418585"
+  },
+  {
+    "checkpoint": 5,
+    "archive_commit": "efdf110c61ad6f8485a5006590402e855089ca1c",
+    "input_tree": "5f7e8fed9a681a435a8055b7cd218bbfe2418585",
+    "output_tree": "ca1795d4267c4b48c946adef59a98d2a355ef402"
+  },
+  {
+    "checkpoint": 6,
+    "archive_commit": "f00d0c655abe9f10c3b6242332b68cab28797c9e",
+    "input_tree": "ca1795d4267c4b48c946adef59a98d2a355ef402",
+    "output_tree": "63a765d04d54160ed0f34f345a7edbebf110f735"
+  },
+  {
+    "checkpoint": 7,
+    "archive_commit": "2a18aa9ed543cac9033b2f900e2f445a1027ce7a",
+    "input_tree": "63a765d04d54160ed0f34f345a7edbebf110f735",
+    "output_tree": "539b2b066c14067324f99281e5e946bfbf7e773e"
+  },
+  {
+    "checkpoint": 8,
+    "archive_commit": "a7274aaaa885258fd9dcdd2b05227414de9219b9",
+    "input_tree": "539b2b066c14067324f99281e5e946bfbf7e773e",
+    "output_tree": "20628ef888f2e81148884e4ff8e175cae3479a8a"
+  },
+  {
+    "checkpoint": 9,
+    "archive_commit": "295786957a72d2124384ccb46b1e423d4b7a5c55",
+    "input_tree": "20628ef888f2e81148884e4ff8e175cae3479a8a",
+    "output_tree": "b88941545570455b53ab3e9161f147791260365c"
+  },
+  {
+    "checkpoint": 10,
+    "archive_commit": "ee54941da1c9cc61a43e2b1b7a1fb6325713e280",
+    "input_tree": "b88941545570455b53ab3e9161f147791260365c",
+    "output_tree": "46b916688e70f550f8ff37750270e63e7b43a98e"
+  },
+  {
+    "checkpoint": 11,
+    "archive_commit": "0645ed34e32cc8e40d3b40e2998cbe0e5c77dc7d",
+    "input_tree": "46b916688e70f550f8ff37750270e63e7b43a98e",
+    "output_tree": "2416fd61a1a56f47dea56afa53e491497608c4a0"
+  }
+]

@@ -1,0 +1,262 @@
+diff --git a/stockroom/README.md b/stockroom/README.md
+index 102cdb959f052403b8427b6332c7aed4a0a57b58..daf75bb256c80b3fe6c99821f555694e3bdeae4c 100644
+--- a/stockroom/README.md
++++ b/stockroom/README.md
+@@ -25,4 +25,18 @@ Pass the same workspace path from CP00. One transaction creates schema v1 and po
+ 
+ Quantity columns use `ANY` in STRICT tables, with explicit integer and bounds checks. This preserves the bound SQLite value's type so a REAL value or numeric text cannot pass as an integer. F1 retains historical location codes for the later migration exercise.
+ 
++## CP02 · Transfer stock and reconcile the journal
++
++In the same disposable CP01 workspace, run:
++
++```sh
++python3 -m stockroom transfer "/absolute/path/to/stockroom ledger.sqlite3" tx-001 item-bolt loc-north loc-south 3
++python3 -m stockroom check "/absolute/path/to/stockroom ledger.sqlite3"
++python3 -m unittest discover -s stockroom -t . -v
++```
++
++The expected bolt balances are 7 and 5. Nuts stay at 4 and 8. O1 expects one transfer and two journal entries. A duplicate ID is an error at this stage.
++
++Try a different ID with `--fail-after-debit` in the disposable workspace. The command should exit nonzero. Run `check` again and compare the balances and journal counts with the previous check. An excessive quantity, unknown position or identical source and destination also fails without moving stock. The savepoint regression verifies that the caller can keep earlier work in the same transaction after a single failed move. Closing or rolling back the outer transaction still controls durability.
++
+ These development checkpoints require execution and independent review before acceptance.
+diff --git a/stockroom/__main__.py b/stockroom/__main__.py
+index 45443d743a0aa9deed96c4ec09636a0b427ee769..31bb50c44643e170b3aefae6f35665c10383e5bf 100644
+--- a/stockroom/__main__.py
++++ b/stockroom/__main__.py
+@@ -7,6 +7,7 @@ import sqlite3
+ 
+ from .environment import initialize_workspace, inspect_workspace, runtime_profile
+ from .ledger import check_ledger, initialize_ledger
++from .transfer import Transfer, transfer
+ 
+ 
+ def main() -> int:
+@@ -21,6 +22,14 @@ def main() -> int:
+     init.add_argument("database", type=Path)
+     check = commands.add_parser("check", help="Verify schema identity and reconcile F1/O1")
+     check.add_argument("database", type=Path)
++    move = commands.add_parser("transfer", help="Atomically move units between locations")
++    move.add_argument("database", type=Path)
++    move.add_argument("id")
++    move.add_argument("item_id")
++    move.add_argument("source_location_id")
++    move.add_argument("destination_location_id")
++    move.add_argument("quantity", type=int)
++    move.add_argument("--fail-after-debit", action="store_true", help="Roll back after a simulated failure in a disposable workspace")
+     args = parser.parse_args()
+ 
+     try:
+@@ -32,8 +41,12 @@ def main() -> int:
+             result = inspect_workspace(args.database)
+         elif args.command == "init":
+             result = initialize_ledger(args.database)
+-        else:
++        elif args.command == "check":
+             result = check_ledger(args.database)
++        else:
++            request = Transfer(args.id, args.item_id, args.source_location_id,
++                               args.destination_location_id, args.quantity)
++            result = transfer(args.database, request, fail_after_debit=args.fail_after_debit)
+     except (OSError, sqlite3.Error, ValueError, RuntimeError) as error:
+         parser.exit(2, f"stockroom: {error}\n")
+     print(json.dumps(result, indent=2))
+diff --git a/stockroom/test_transfer.py b/stockroom/test_transfer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7f15ea106972f7d6870d47d9f828ae0d9bf86db
+--- /dev/null
++++ b/stockroom/test_transfer.py
+@@ -0,0 +1,98 @@
++from contextlib import closing
++import json
++from pathlib import Path
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++
++from .environment import connect, initialize_workspace
++from .ledger import check_ledger, initialize_ledger, write_transaction
++from .transfer import MAX_BALANCE, Transfer, apply_in_transaction, transfer
++
++
++def sample(identifier="tx-001", quantity=3):
++    return Transfer(identifier, "item-bolt", "loc-north", "loc-south", quantity)
++
++
++class TransferTests(unittest.TestCase):
++    def setUp(self):
++        directory = tempfile.TemporaryDirectory()
++        self.addCleanup(directory.cleanup)
++        self.database = Path(initialize_workspace(Path(directory.name))["database"])
++        initialize_ledger(self.database)
++
++    def state(self, quantities, transfers):
++        verdict = check_ledger(self.database)
++        self.assertTrue(verdict["ok"], verdict)
++        self.assertEqual([row["quantity"] for row in verdict["balances"]], quantities)
++        self.assertEqual(verdict["transfers"], transfers)
++        self.assertEqual(verdict["journal_entries"], transfers * 2)
++
++    def test_cli_transfers_and_reopened_check_agrees(self):
++        p = subprocess.run(
++            [sys.executable, "-m", "stockroom", "transfer", str(self.database),
++             "tx-001", "item-bolt", "loc-north", "loc-south", "3"],
++            check=True, capture_output=True, text=True, timeout=10,
++        )
++        self.assertEqual(json.loads(p.stdout)["status"], "committed")
++        self.state([7, 5, 4, 8], 1)
++
++    def test_failure_after_debit_is_invisible_after_reopen(self):
++        with self.assertRaisesRegex(RuntimeError, "after debit"):
++            transfer(self.database, sample(), fail_after_debit=True)
++        self.state([10, 2, 4, 8], 0)
++
++    def test_insufficient_stock_and_missing_position_leave_no_rows(self):
++        with self.assertRaisesRegex(ValueError, "Insufficient"):
++            transfer(self.database, sample(quantity=11))
++        with self.assertRaises(sqlite3.IntegrityError):
++            transfer(self.database, Transfer("tx-missing", "item-bolt", "loc-north", "nowhere", 1))
++        self.state([10, 2, 4, 8], 0)
++
++    def test_duplicate_id_is_an_error_and_has_no_repeated_effect(self):
++        transfer(self.database, sample())
++        with self.assertRaises(sqlite3.IntegrityError):
++            transfer(self.database, sample())
++        self.state([7, 5, 4, 8], 1)
++
++    def test_savepoint_reverts_one_failure_and_preserves_other_work(self):
++        with closing(connect(self.database)) as db:
++            with write_transaction(db):
++                apply_in_transaction(db, sample())
++                with self.assertRaisesRegex(RuntimeError, "after debit"):
++                    apply_in_transaction(db, sample("tx-failed"), fail_after_debit=True)
++                self.assertTrue(db.in_transaction)
++                apply_in_transaction(db, sample("tx-002", 2))
++        self.state([5, 7, 4, 8], 2)
++
++    def test_parent_rollback_reverts_a_released_savepoint(self):
++        with closing(connect(self.database)) as db:
++            db.execute("BEGIN IMMEDIATE")
++            apply_in_transaction(db, sample())
++            db.execute("ROLLBACK")
++        self.state([10, 2, 4, 8], 0)
++
++    def test_application_does_not_coerce_quantity_or_accept_bad_ids(self):
++        for value in (None, False, True, "3", 3.0, 0, -1, 1_000_000_001):
++            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "Quantity"):
++                sample(quantity=value)
++        for bad in ("", " ", " tx-001", "x\x00y", "a/b", 42):
++            with self.subTest(identifier=bad), self.assertRaisesRegex(ValueError, "canonical identifier"):
++                sample(identifier=bad)
++        with self.assertRaisesRegex(ValueError, "must differ"):
++            Transfer("tx-same", "item-bolt", "loc-north", "loc-north", 1)
++        self.state([10, 2, 4, 8], 0)
++
++    def test_balance_overflow_rolls_back_the_source_debit(self):
++        with closing(connect(self.database)) as db:
++            with write_transaction(db):
++                for table in ("opening_balance", "stock_balance"):
++                    db.execute(
++                        f"UPDATE {table} SET quantity=? WHERE item_id='item-bolt' AND location_id='loc-south'",
++                        (MAX_BALANCE,),
++                    )
++        with self.assertRaisesRegex(ValueError, "overflow"):
++            transfer(self.database, sample())
++        self.state([10, MAX_BALANCE, 4, 8], 0)
+diff --git a/stockroom/transfer.py b/stockroom/transfer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe360abc6a6078c4207368df88d491b4d0b966ea
+--- /dev/null
++++ b/stockroom/transfer.py
+@@ -0,0 +1,88 @@
++"""CP02: hold one write transaction for a transfer and both journal legs."""
++
++from contextlib import closing
++from dataclasses import asdict, dataclass
++from pathlib import Path
++import re
++import sqlite3
++
++from .environment import connect
++from .ledger import require_version, write_transaction
++
++
++MAX_TRANSFER = 1_000_000_000
++MAX_BALANCE = (1 << 63) - 1
++IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
++
++
++@dataclass(frozen=True)
++class Transfer:
++    id: str
++    item_id: str
++    source_location_id: str
++    destination_location_id: str
++    quantity: int
++
++    def __post_init__(self):
++        for name in ("id", "item_id", "source_location_id", "destination_location_id"):
++            value = getattr(self, name)
++            if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
++                raise ValueError(f"Invalid {name}: expected a canonical identifier")
++        if self.source_location_id == self.destination_location_id:
++            raise ValueError("The source and destination must differ")
++        if type(self.quantity) is not int or not 1 <= self.quantity <= MAX_TRANSFER:
++            raise ValueError(f"Quantity must be an integer from 1 to {MAX_TRANSFER}")
++
++
++def apply_in_transaction(
++    db: sqlite3.Connection, request: Transfer, *, fail_after_debit: bool = False
++) -> None:
++    """Apply one transfer within a caller-owned write transaction using a savepoint."""
++    if not db.in_transaction or db.execute("PRAGMA foreign_keys").fetchone() != (1,):
++        raise ValueError("Transfer requires an active transaction with foreign keys enabled")
++    require_version(db, 1)
++    db.execute("SAVEPOINT stockroom_transfer")
++    try:
++        db.execute(
++            "INSERT INTO transfer(id,item_id,source_location_id,destination_location_id,quantity) "
++            "VALUES(?,?,?,?,?)",
++            (request.id, request.item_id, request.source_location_id,
++             request.destination_location_id, request.quantity),
++        )
++        source = db.execute(
++            "UPDATE stock_balance SET quantity=quantity-? "
++            "WHERE item_id=? AND location_id=? AND quantity>=?",
++            (request.quantity, request.item_id, request.source_location_id, request.quantity),
++        )
++        if source.rowcount != 1:
++            raise ValueError("Insufficient stock or missing source balance")
++        if fail_after_debit:
++            raise RuntimeError("Deliberate failure after debit")
++        destination = db.execute(
++            "UPDATE stock_balance SET quantity=quantity+? "
++            "WHERE item_id=? AND location_id=? AND quantity<=?",
++            (request.quantity, request.item_id, request.destination_location_id,
++             MAX_BALANCE - request.quantity),
++        )
++        if destination.rowcount != 1:
++            raise ValueError("Destination balance would overflow or is missing")
++        db.executemany(
++            "INSERT INTO journal_entry(transfer_id,item_id,location_id,delta) VALUES(?,?,?,?)",
++            [
++                (request.id, request.item_id, request.source_location_id, -request.quantity),
++                (request.id, request.item_id, request.destination_location_id, request.quantity),
++            ],
++        )
++        db.execute("RELEASE stockroom_transfer")
++    except BaseException:
++        if db.in_transaction:
++            db.execute("ROLLBACK TO stockroom_transfer")
++            db.execute("RELEASE stockroom_transfer")
++        raise
++
++
++def transfer(path: Path, request: Transfer, *, fail_after_debit: bool = False) -> dict:
++    with closing(connect(path)) as db:
++        with write_transaction(db):
++            apply_in_transaction(db, request, fail_after_debit=fail_after_debit)
++    return {"status": "committed", "transfer": asdict(request)}

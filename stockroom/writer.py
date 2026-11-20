@@ -12,18 +12,30 @@ from .operation import execute, parser
 from .transfer import Transfer, apply_in_transaction
 
 
+RECEIPT_TRIGGER = """CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer
+BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END"""
+
+
+def require_receipt_trigger(db):
+    row = db.execute(
+        "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='record_transfer_receipt'"
+    ).fetchone()
+    if row is None or row[0].split() != RECEIPT_TRIGGER.split():
+        raise ValueError("receipt trigger is missing or differs from the Stockroom definition")
+
+
 def install(path):
     with closing(connect(path)) as db, write_transaction(db):
         require_ledger(db)
-        db.executescript("""
+        db.executescript(f"""
             CREATE TABLE IF NOT EXISTS receipt(
               seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
             ) STRICT;
             INSERT INTO receipt(transfer_id)
               SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid;
-            CREATE TRIGGER IF NOT EXISTS record_transfer_receipt AFTER INSERT ON transfer
-            BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END;
+            {RECEIPT_TRIGGER.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1)};
         """)
+        require_receipt_trigger(db)
         return {"receipt_count": watermark(db)}
 
 
@@ -34,6 +46,13 @@ def watermark(db):
     if count != maximum or transfers != count or minimum != 1:
         raise ValueError("receipt sequence or transfer count inconsistent")
     return maximum
+
+
+def receipt_for(db, transfer_id):
+    row = db.execute("SELECT seq FROM receipt WHERE transfer_id=?", (transfer_id,)).fetchone()
+    if row is None:
+        raise ValueError("transfer did not produce a receipt")
+    return row[0]
 
 
 def submit(path, request, wait_ms=500):
@@ -57,8 +76,7 @@ def submit(path, request, wait_ms=500):
                         sequence = prior[4]
                     else:
                         apply_in_transaction(db, request)
-                        sequence = db.execute("SELECT seq FROM receipt WHERE transfer_id=?",
-                                              (request.id,)).fetchone()[0]
+                        sequence = receipt_for(db, request.id)
             return {"id": request.id, "receipt": sequence, "replayed": prior is not None,
                     "events": events}
         except sqlite3.OperationalError as exc:

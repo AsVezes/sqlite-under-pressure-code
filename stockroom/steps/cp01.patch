@@ -1,0 +1,281 @@
+diff --git a/stockroom/README.md b/stockroom/README.md
+index 93048d6f16e927392a2905734e00e46ccc3e375d..102cdb959f052403b8427b6332c7aed4a0a57b58 100644
+--- a/stockroom/README.md
++++ b/stockroom/README.md
+@@ -13,4 +13,16 @@ python3 -m unittest discover -s stockroom -t . -v
+ 
+ Use the exact database path returned by `workspace`. It creates a new directory each time. The second connection reports the same workspace ID, database path and schema version 0. Try a path in a different directory to see the refusal without creating a second database. The `doctor` output identifies the shell and Python's embedded SQLite separately.
+ 
+-This development checkpoint requires execution and independent review before acceptance.
++## CP01 · Install schema v1 in the CP00 database
++
++```sh
++python3 -m stockroom init "/absolute/path/to/stockroom ledger.sqlite3"
++python3 -m stockroom check "/absolute/path/to/stockroom ledger.sqlite3"
++python3 -m unittest discover -s stockroom -t . -v
++```
++
++Pass the same workspace path from CP00. One transaction creates schema v1 and populates F1 with quantities 10/2 for bolts and 4/8 for nuts. The O1 check opens the database read-only and reconciles every position, movement and journal entry. It exits 1 if balances do not reconcile and 2 if the database or invocation is invalid.
++
++Quantity columns use `ANY` in STRICT tables, with explicit integer and bounds checks. This preserves the bound SQLite value's type so a REAL value or numeric text cannot pass as an integer. F1 retains historical location codes for the later migration exercise.
++
++These development checkpoints require execution and independent review before acceptance.
+diff --git a/stockroom/__main__.py b/stockroom/__main__.py
+index 9c128271357aa0f58326f1cf0a0d425373812f31..45443d743a0aa9deed96c4ec09636a0b427ee769 100644
+--- a/stockroom/__main__.py
++++ b/stockroom/__main__.py
+@@ -6,6 +6,7 @@ from pathlib import Path
+ import sqlite3
+ 
+ from .environment import initialize_workspace, inspect_workspace, runtime_profile
++from .ledger import check_ledger, initialize_ledger
+ 
+ 
+ def main() -> int:
+@@ -16,6 +17,10 @@ def main() -> int:
+     workspace.add_argument("--parent", type=Path, help="Existing directory for the new workspace")
+     identify = commands.add_parser("identity", help="Identify an existing workspace")
+     identify.add_argument("database", type=Path)
++    init = commands.add_parser("init", help="Install schema v1 and seed F1 in a CP00 workspace")
++    init.add_argument("database", type=Path)
++    check = commands.add_parser("check", help="Verify schema identity and reconcile F1/O1")
++    check.add_argument("database", type=Path)
+     args = parser.parse_args()
+ 
+     try:
+@@ -23,12 +28,16 @@ def main() -> int:
+             result = runtime_profile()
+         elif args.command == "workspace":
+             result = initialize_workspace(args.parent)
+-        else:
++        elif args.command == "identity":
+             result = inspect_workspace(args.database)
++        elif args.command == "init":
++            result = initialize_ledger(args.database)
++        else:
++            result = check_ledger(args.database)
+     except (OSError, sqlite3.Error, ValueError, RuntimeError) as error:
+         parser.exit(2, f"stockroom: {error}\n")
+     print(json.dumps(result, indent=2))
+-    return 0
++    return 1 if args.command == "check" and not result["ok"] else 0
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/stockroom/ledger.py b/stockroom/ledger.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..269d22d07b2ff0c05666fb797c7f1236a139948a
+--- /dev/null
++++ b/stockroom/ledger.py
+@@ -0,0 +1,72 @@
++"""CP01: install schema v1 and load the shared F1 opening balances."""
++
++from contextlib import closing, contextmanager
++from pathlib import Path
++import sqlite3
++
++from tools import e1
++
++from .environment import connect, identity
++
++
++SCHEMA_V1 = Path(__file__).with_name("schema_v1.sql")
++
++
++@contextmanager
++def write_transaction(db: sqlite3.Connection):
++    db.execute("BEGIN IMMEDIATE")
++    try:
++        yield
++        db.execute("COMMIT")
++    except BaseException:
++        if db.in_transaction:
++            db.execute("ROLLBACK")
++        raise
++
++
++def require_version(db: sqlite3.Connection, version: int) -> dict:
++    details = identity(db)
++    if details["schema_version"] != version:
++        raise ValueError(
++            f"Expected Stockroom Ledger schema v{version}, found v{details['schema_version']}"
++        )
++    return details
++
++
++def seed_f1(db: sqlite3.Connection) -> None:
++    # Load the shared pilot in memory and copy just its stable opening data.
++    # Application DDL and constraints come from schema_v1.sql.
++    with closing(sqlite3.connect(":memory:", autocommit=True)) as fixture:
++        fixture.executescript(e1.SCHEMA.read_text(encoding="utf-8"))
++        db.executemany(
++            "INSERT INTO item(id,sku) VALUES(?,?)",
++            fixture.execute("SELECT id,sku FROM item ORDER BY id"),
++        )
++        db.executemany(
++            "INSERT INTO location(id,code) VALUES(?,?)",
++            fixture.execute("SELECT id,code FROM location ORDER BY id"),
++        )
++        db.executemany(
++            "INSERT INTO opening_balance(item_id,location_id,quantity) VALUES(?,?,?)",
++            fixture.execute("SELECT item_id,location_id,quantity FROM opening_balance ORDER BY item_id,location_id"),
++        )
++    db.execute(
++        "INSERT INTO stock_balance(item_id,location_id,quantity) "
++        "SELECT item_id,location_id,quantity FROM opening_balance"
++    )
++
++
++def initialize_ledger(path: Path) -> dict:
++    with closing(connect(path)) as db:
++        with write_transaction(db):
++            require_version(db, 0)
++            db.executescript(SCHEMA_V1.read_text(encoding="utf-8"))
++            seed_f1(db)
++            db.execute("PRAGMA user_version=1")
++        return identity(db)
++
++
++def check_ledger(path: Path) -> dict:
++    with closing(connect(path, read_only=True)) as db:
++        require_version(db, 1)
++    return e1.inspect(path)
+diff --git a/stockroom/schema_v1.sql b/stockroom/schema_v1.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..45e9617fd40b9084350f398d3dd4c51b56768d60
+--- /dev/null
++++ b/stockroom/schema_v1.sql
+@@ -0,0 +1,56 @@
++CREATE TABLE item (
++    id ANY NOT NULL PRIMARY KEY CHECK (
++        typeof(id) = 'text' AND instr(id, char(0)) = 0
++        AND id GLOB '[A-Za-z0-9]*' AND id NOT GLOB '*[^A-Za-z0-9._-]*'
++    ),
++    sku TEXT NOT NULL UNIQUE CHECK (length(trim(sku)) > 0)
++) STRICT;
++
++CREATE TABLE location (
++    id ANY NOT NULL PRIMARY KEY CHECK (
++        typeof(id) = 'text' AND instr(id, char(0)) = 0
++        AND id GLOB '[A-Za-z0-9]*' AND id NOT GLOB '*[^A-Za-z0-9._-]*'
++    ),
++    code TEXT NOT NULL CHECK (length(trim(code)) > 0)
++) STRICT;
++
++CREATE TABLE opening_balance (
++    item_id ANY NOT NULL REFERENCES item(id),
++    location_id ANY NOT NULL REFERENCES location(id),
++    quantity ANY NOT NULL CHECK (typeof(quantity) = 'integer' AND quantity >= 0),
++    PRIMARY KEY (item_id, location_id)
++) STRICT;
++
++CREATE TABLE stock_balance (
++    item_id ANY NOT NULL,
++    location_id ANY NOT NULL,
++    quantity ANY NOT NULL CHECK (typeof(quantity) = 'integer' AND quantity >= 0),
++    PRIMARY KEY (item_id, location_id),
++    FOREIGN KEY (item_id, location_id) REFERENCES opening_balance(item_id, location_id)
++) STRICT;
++
++CREATE TABLE transfer (
++    id ANY NOT NULL PRIMARY KEY CHECK (
++        typeof(id) = 'text' AND instr(id, char(0)) = 0
++        AND id GLOB '[A-Za-z0-9]*' AND id NOT GLOB '*[^A-Za-z0-9._-]*'
++    ),
++    item_id ANY NOT NULL,
++    source_location_id ANY NOT NULL,
++    destination_location_id ANY NOT NULL,
++    quantity ANY NOT NULL CHECK (typeof(quantity) = 'integer' AND quantity BETWEEN 1 AND 1000000000),
++    CHECK (source_location_id <> destination_location_id),
++    FOREIGN KEY (item_id, source_location_id) REFERENCES opening_balance(item_id, location_id),
++    FOREIGN KEY (item_id, destination_location_id) REFERENCES opening_balance(item_id, location_id)
++) STRICT;
++
++CREATE TABLE journal_entry (
++    id INTEGER PRIMARY KEY,
++    transfer_id ANY NOT NULL REFERENCES transfer(id),
++    item_id ANY NOT NULL,
++    location_id ANY NOT NULL,
++    delta ANY NOT NULL CHECK (
++        typeof(delta) = 'integer' AND delta BETWEEN -1000000000 AND 1000000000 AND delta <> 0
++    ),
++    UNIQUE (transfer_id, location_id),
++    FOREIGN KEY (item_id, location_id) REFERENCES opening_balance(item_id, location_id)
++) STRICT;
+diff --git a/stockroom/test_ledger.py b/stockroom/test_ledger.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fdefd8e3579f28af4ec2cad1b86a4574ea0d5a5c
+--- /dev/null
++++ b/stockroom/test_ledger.py
+@@ -0,0 +1,71 @@
++from contextlib import closing
++import hashlib
++from pathlib import Path
++import sqlite3
++import tempfile
++import unittest
++from unittest.mock import patch
++
++from .environment import connect, initialize_workspace, inspect_workspace
++from .ledger import check_ledger, initialize_ledger
++
++
++class LedgerTests(unittest.TestCase):
++    def setUp(self):
++        directory = tempfile.TemporaryDirectory()
++        self.addCleanup(directory.cleanup)
++        self.database = Path(initialize_workspace(Path(directory.name))["database"])
++
++    def test_v1_uses_existing_workspace_and_loads_f1_for_o1(self):
++        initial = inspect_workspace(self.database)
++        result = initialize_ledger(self.database)
++        self.assertEqual(result["workspace_id"], initial["workspace_id"])
++        self.assertEqual(result["schema_version"], 1)
++        before = hashlib.sha256(self.database.read_bytes()).digest()
++        verdict = check_ledger(self.database)
++        self.assertTrue(verdict["ok"], verdict)
++        self.assertEqual(verdict["transfers"], 0)
++        self.assertEqual(verdict["journal_entries"], 0)
++        self.assertEqual([row["quantity"] for row in verdict["balances"]], [10, 2, 4, 8])
++        self.assertEqual(hashlib.sha256(self.database.read_bytes()).digest(), before)
++        with self.assertRaisesRegex(ValueError, "Expected.*v0"):
++            # Initializing a v1 workspace must never reload its fixture.
++            initialize_ledger(self.database)
++
++    def test_schema_install_rolls_back_on_seed_failure(self):
++        with patch("stockroom.ledger.seed_f1", side_effect=RuntimeError("seed failure")):
++            with self.assertRaisesRegex(RuntimeError, "seed failure"):
++                initialize_ledger(self.database)
++        self.assertEqual(inspect_workspace(self.database)["schema_version"], 0)
++        with closing(connect(self.database)) as db:
++            self.assertIsNone(db.execute("SELECT name FROM sqlite_schema WHERE name='item'").fetchone())
++        self.assertEqual(initialize_ledger(self.database)["schema_version"], 1)
++
++    def test_schema_rejects_invalid_rows_without_coercing(self):
++        initialize_ledger(self.database)
++        with closing(connect(self.database)) as db:
++            cases = [
++                ("empty item", "INSERT INTO item VALUES(?,?)", ("", "new")),
++                ("null location", "INSERT INTO location VALUES(?,?)", (None, "new")),
++                ("numeric item id", "INSERT INTO item VALUES(?,?)", (37, "new")),
++                ("missing reference", "INSERT INTO opening_balance VALUES(?,?,?)", ("missing", "loc-north", 1)),
++                ("empty transfer", "INSERT INTO transfer VALUES(?,?,?,?,?)",
++                 ("", "item-bolt", "loc-north", "loc-south", 2)),
++                ("same location", "INSERT INTO transfer VALUES(?,?,?,?,?)",
++                 ("tx-same", "item-bolt", "loc-north", "loc-north", 2)),
++            ]
++            for quantity in (None, "3", 3.0, 0, -1, 1_000_000_001):
++                cases.append((repr(quantity), "INSERT INTO transfer VALUES(?,?,?,?,?)",
++                              ("tx-bad", "item-bolt", "loc-north", "loc-south", quantity)))
++            for name, sql, params in cases:
++                with self.subTest(name=name), self.assertRaises(sqlite3.IntegrityError):
++                    db.execute(sql, params)
++        self.assertTrue(check_ledger(self.database)["ok"])
++
++    def test_o1_detects_projection_drift_in_valid_sqlite_file(self):
++        initialize_ledger(self.database)
++        with closing(connect(self.database)) as db:
++            db.execute("UPDATE stock_balance SET quantity=quantity+1 WHERE item_id='item-bolt' AND location_id='loc-north'")
++        verdict = check_ledger(self.database)
++        self.assertFalse(verdict["ok"])
++        self.assertIn("O1_BALANCE_MISMATCH:item-bolt:loc-north", verdict["errors"])

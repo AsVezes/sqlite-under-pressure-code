@@ -5,6 +5,8 @@ import json
 
 from fixtures.f3_preflight import canonical
 
+from tools.e1 import inspect_connection
+
 from .environment import connect
 from .ledger import require_version, write_transaction
 from .operation import execute, parser
@@ -107,7 +109,15 @@ def step(path, batch_size=1, *, interrupt=None):
                 if interrupt:
                     interrupt("batch")
                 return {"status": "staged", "cursor": cursor, "total": len(rows), "schema": 1}
+            before_ledger = inspect_connection(db)
+            if not before_ledger["ok"]:
+                raise ValueError(f"source ledger fails O1: {before_ledger['errors']}")
             rebuild(db)
+            locations = db.execute("SELECT id,code_history,code FROM location ORDER BY id").fetchall()
+            if locations != rows:
+                raise ValueError("rebuilt location codes differ from the staged mapping")
+            if inspect_connection(db) != before_ledger:
+                raise ValueError("rebuilt ledger differs from the validated source")
             if watermark(db) != before:
                 raise ValueError("receipt boundary changed during rebuild")
             if interrupt:

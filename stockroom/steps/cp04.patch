@@ -1,0 +1,124 @@
+diff --git a/stockroom/ledger.py b/stockroom/ledger.py
+index 269d22d07b2ff0c05666fb797c7f1236a139948a..a35f625a00d87fc237017460b3e75a3925121fa0 100644
+--- a/stockroom/ledger.py
++++ b/stockroom/ledger.py
+@@ -13,14 +13,31 @@ SCHEMA_V1 = Path(__file__).with_name("schema_v1.sql")
+ 
+ 
+ @contextmanager
+-def write_transaction(db: sqlite3.Connection):
+-    db.execute("BEGIN IMMEDIATE")
++def write_transaction(db: sqlite3.Connection, trace=None):
++    if db.in_transaction:
++        raise ValueError("write_transaction requires an idle connection")
++    phase = "begin"
++    if trace:
++        trace(phase)
+     try:
++        db.execute("BEGIN IMMEDIATE")
++        phase = "work"
++        if trace:
++            trace(phase)
+         yield
++        phase = "commit"
++        if trace:
++            trace(phase)
+         db.execute("COMMIT")
+-    except BaseException:
++        if trace:
++            trace("committed")
++    except BaseException as error:
++        if trace:
++            trace(phase + "_failed", error)
+         if db.in_transaction:
+             db.execute("ROLLBACK")
++            if trace:
++                trace("rolled_back")
+         raise
+ 
+ 
+diff --git a/stockroom/observe.py b/stockroom/observe.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e553d1a356a894ac5f4958c044711139a872e687
+--- /dev/null
++++ b/stockroom/observe.py
+@@ -0,0 +1,37 @@
++"""CP04: capture a passive WAL observation without interpreting file size as backlog."""
++from contextlib import closing
++from time import monotonic_ns
++
++from .environment import connect
++from .ledger import require_version
++from .operation import execute, parser
++from .storage import current
++
++
++def event(events, phase, error=None):
++    if events is None:
++        return
++    row = {"phase": phase, "monotonic_ns": monotonic_ns()}
++    if error is not None:
++        row.update(error=str(error), code=getattr(error, "sqlite_errorcode", None),
++                   name=getattr(error, "sqlite_errorname", None))
++    events.append(row)
++
++
++def observe(path):
++    with closing(connect(path)) as db:
++        require_version(db, 1)
++        state = current(db)
++        busy, frames, backfilled = db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
++        return {"profile": state, "checkpoint": {
++            "busy": busy, "frames": frames, "backfilled": backfilled,
++        }}
++
++
++def main():
++    args = parser(__doc__).parse_args()
++    return execute(lambda: observe(args.database))
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/stockroom/test_storage.py b/stockroom/test_storage.py
+index eceb8a119c5df6883a1d35f9a02f788079e22974..0713985184a4d48e96f2b90c0e19d2f61fdb13b1 100644
+--- a/stockroom/test_storage.py
++++ b/stockroom/test_storage.py
+@@ -26,3 +26,37 @@ class StorageTests(unittest.TestCase):
+                 reader.execute("ROLLBACK")
+                 self.assertEqual(reader.execute(query).fetchone(), (7,))
+             self.assertTrue(check_ledger(path)["ok"])
++
++    def test_checkpoint_progress_and_extended_errors(self):
++        import sqlite3
++        from .observe import observe
++        with TemporaryDirectory() as directory:
++            path = Path(initialize_workspace(Path(directory))["database"])
++            initialize_ledger(path)
++            profile(path, "wal")
++            with closing(connect(path, timeout=0)) as first, closing(connect(path, timeout=0)) as second:
++                first.execute("BEGIN IMMEDIATE")
++                with self.assertRaises(sqlite3.OperationalError) as busy:
++                    second.execute("BEGIN IMMEDIATE")
++                self.assertEqual(busy.exception.sqlite_errorcode, sqlite3.SQLITE_BUSY)
++                first.execute("ROLLBACK")
++                first.execute("BEGIN")
++                first.execute("SELECT * FROM location").fetchall()
++                transfer(path, Transfer("t1", "item-bolt", "loc-north", "loc-south", 1))
++                with self.assertRaises(sqlite3.OperationalError) as stale:
++                    first.execute("UPDATE location SET code=code")
++                self.assertEqual(stale.exception.sqlite_errorcode, sqlite3.SQLITE_BUSY_SNAPSHOT)
++                during = observe(path)["checkpoint"]
++                self.assertLess(during["backfilled"], during["frames"])
++                first.execute("ROLLBACK")
++                after = observe(path)["checkpoint"]
++                self.assertEqual(after["backfilled"], after["frames"])
++                first.executescript("CREATE TEMP TABLE sample(value); INSERT INTO sample VALUES (1),(2);")
++                cursor = first.execute("SELECT value FROM sample")
++                self.assertEqual(cursor.fetchone(), (1,))
++                with self.assertRaises(sqlite3.OperationalError) as locked:
++                    first.execute("DROP TABLE sample")
++                self.assertEqual(locked.exception.sqlite_errorcode, sqlite3.SQLITE_LOCKED)
++                cursor.close()
++                first.execute("DROP TABLE sample")
++            self.assertTrue(check_ledger(path)["ok"])

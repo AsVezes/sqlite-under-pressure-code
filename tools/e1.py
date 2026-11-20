@@ -62,111 +62,116 @@ def inspect(path: Path) -> dict:
         # In WAL mode a writer may commit between SELECTs; without BEGIN the
         # oracle could combine balances and journal from different commits.
         connection.execute("BEGIN")
-        errors = []
-        integrity = [r[0] for r in connection.execute("PRAGMA quick_check")]
-        if integrity != ["ok"]:
-            errors.append("O1_STRUCTURAL_CHECK")
-        if list(connection.execute("PRAGMA foreign_key_check")):
-            errors.append("O1_FOREIGN_KEY")
-        opening = {
-            (item, location): quantity
-            for item, location, quantity in connection.execute(
-                "SELECT item_id, location_id, quantity FROM opening_balance"
-            )
-        }
-        balances = {
-            (item, location): quantity
-            for item, location, quantity in connection.execute(
-                "SELECT item_id, location_id, quantity FROM stock_balance"
-            )
-        }
-        transfers = list(connection.execute(
-            "SELECT id, item_id, source_location_id, "
-            "destination_location_id, quantity FROM transfer ORDER BY id"
-        ))
-        journal = list(connection.execute(
-            "SELECT transfer_id, item_id, location_id, delta "
-            "FROM journal_entry ORDER BY transfer_id, id"
-        ))
-        # SQLite's INTEGER affinity and CHECK(quantity >= 0) can still store
-        # nonnumeric TEXT. Never allow Python arithmetic or comparisons to
-        # misclassify such rows or turn an oracle failure into a traceback.
-        quantities = (
-            list(opening.values())
-            + list(balances.values())
-            + [row[4] for row in transfers]
-            + [row[3] for row in journal]
+        return inspect_connection(connection)
+    finally:
+        connection.close()
+
+
+def inspect_connection(connection: sqlite3.Connection) -> dict:
+    """Run O1 on an existing snapshot without taking ownership of it."""
+    errors = []
+    integrity = [r[0] for r in connection.execute("PRAGMA quick_check")]
+    if integrity != ["ok"]:
+        errors.append("O1_STRUCTURAL_CHECK")
+    if list(connection.execute("PRAGMA foreign_key_check")):
+        errors.append("O1_FOREIGN_KEY")
+    opening = {
+        (item, location): quantity
+        for item, location, quantity in connection.execute(
+            "SELECT item_id, location_id, quantity FROM opening_balance"
         )
-        if any(type(quantity) is not int for quantity in quantities):
-            errors.append("O1_NONINTEGER_QUANTITY")
-            return {
-                "oracle": "O1",
-                "ok": False,
-                "errors": sorted(set(errors)),
-                "balances": [],
-                "transfers": len(transfers),
-                "journal_entries": len(journal),
-            }
-        # A damaged or externally edited database can bypass CHECK constraints.
-        # Matching negative opening/current balances must never pass O1.
-        if any(quantity < 0 for quantity in opening.values()) or any(
-            quantity < 0 for quantity in balances.values()
-        ):
-            errors.append("O1_NEGATIVE_QUANTITY")
-        entries_by_transfer = {}
-        deltas = {}
-        for transfer_id, item, location, delta in journal:
-            entries_by_transfer.setdefault(transfer_id, []).append(
-                (item, location, delta)
-            )
-            key = (item, location)
-            deltas[key] = deltas.get(key, 0) + delta
-
-        if set(opening) != set(balances):
-            errors.append("O1_POSITION_SET")
-        for key in sorted(set(opening) | set(balances) | set(deltas)):
-            expected = opening.get(key, 0) + deltas.get(key, 0)
-            actual = balances.get(key)
-            if actual is None or actual < 0 or actual != expected:
-                errors.append("O1_BALANCE_MISMATCH:" + ":".join(key))
-
-        transfer_ids = set()
-        for transfer_id, item, source, destination, quantity in transfers:
-            transfer_ids.add(transfer_id)
-            # CHECK constraints can be bypassed by an external connection.
-            # A self-transfer or nonpositive amount must never pass O1 merely
-            # because its journal and projected balances reconcile.
-            if not transfer_id.strip() or source == destination or not 1 <= quantity <= 1000000000:
-                errors.append("O1_INVALID_TRANSFER:" + transfer_id)
-            expected = sorted([
-                (item, source, -quantity),
-                (item, destination, quantity),
-            ])
-            if sorted(entries_by_transfer.get(transfer_id, [])) != expected:
-                errors.append("O1_JOURNAL_PAIR:" + transfer_id)
-        for transfer_id in sorted(set(entries_by_transfer) - transfer_ids):
-            errors.append("O1_ORPHAN_JOURNAL:" + transfer_id)
-
-        for item in sorted({key[0] for key in set(opening) | set(balances)}):
-            before = sum(qty for (i, _), qty in opening.items() if i == item)
-            after = sum(qty for (i, _), qty in balances.items() if i == item)
-            if before != after:
-                errors.append("O1_CONSERVATION:" + item)
-
-        errors = sorted(set(errors))
+    }
+    balances = {
+        (item, location): quantity
+        for item, location, quantity in connection.execute(
+            "SELECT item_id, location_id, quantity FROM stock_balance"
+        )
+    }
+    transfers = list(connection.execute(
+        "SELECT id, item_id, source_location_id, "
+        "destination_location_id, quantity FROM transfer ORDER BY id"
+    ))
+    journal = list(connection.execute(
+        "SELECT transfer_id, item_id, location_id, delta "
+        "FROM journal_entry ORDER BY transfer_id, id"
+    ))
+    # SQLite's INTEGER affinity and CHECK(quantity >= 0) can still store
+    # nonnumeric TEXT. Never allow Python arithmetic or comparisons to
+    # misclassify such rows or turn an oracle failure into a traceback.
+    quantities = (
+        list(opening.values())
+        + list(balances.values())
+        + [row[4] for row in transfers]
+        + [row[3] for row in journal]
+    )
+    if any(type(quantity) is not int for quantity in quantities):
+        errors.append("O1_NONINTEGER_QUANTITY")
         return {
             "oracle": "O1",
-            "ok": not errors,
-            "errors": errors,
-            "balances": [
-                {"item_id": item, "location_id": location, "quantity": qty}
-                for (item, location), qty in sorted(balances.items())
-            ],
+            "ok": False,
+            "errors": sorted(set(errors)),
+            "balances": [],
             "transfers": len(transfers),
             "journal_entries": len(journal),
         }
-    finally:
-        connection.close()
+    # A damaged or externally edited database can bypass CHECK constraints.
+    # Matching negative opening/current balances must never pass O1.
+    if any(quantity < 0 for quantity in opening.values()) or any(
+        quantity < 0 for quantity in balances.values()
+    ):
+        errors.append("O1_NEGATIVE_QUANTITY")
+    entries_by_transfer = {}
+    deltas = {}
+    for transfer_id, item, location, delta in journal:
+        entries_by_transfer.setdefault(transfer_id, []).append(
+            (item, location, delta)
+        )
+        key = (item, location)
+        deltas[key] = deltas.get(key, 0) + delta
+
+    if set(opening) != set(balances):
+        errors.append("O1_POSITION_SET")
+    for key in sorted(set(opening) | set(balances) | set(deltas)):
+        expected = opening.get(key, 0) + deltas.get(key, 0)
+        actual = balances.get(key)
+        if actual is None or actual < 0 or actual != expected:
+            errors.append("O1_BALANCE_MISMATCH:" + ":".join(key))
+
+    transfer_ids = set()
+    for transfer_id, item, source, destination, quantity in transfers:
+        transfer_ids.add(transfer_id)
+        # CHECK constraints can be bypassed by an external connection.
+        # A self-transfer or nonpositive amount must never pass O1 merely
+        # because its journal and projected balances reconcile.
+        if not transfer_id.strip() or source == destination or not 1 <= quantity <= 1000000000:
+            errors.append("O1_INVALID_TRANSFER:" + transfer_id)
+        expected = sorted([
+            (item, source, -quantity),
+            (item, destination, quantity),
+        ])
+        if sorted(entries_by_transfer.get(transfer_id, [])) != expected:
+            errors.append("O1_JOURNAL_PAIR:" + transfer_id)
+    for transfer_id in sorted(set(entries_by_transfer) - transfer_ids):
+        errors.append("O1_ORPHAN_JOURNAL:" + transfer_id)
+
+    for item in sorted({key[0] for key in set(opening) | set(balances)}):
+        before = sum(qty for (i, _), qty in opening.items() if i == item)
+        after = sum(qty for (i, _), qty in balances.items() if i == item)
+        if before != after:
+            errors.append("O1_CONSERVATION:" + item)
+
+    errors = sorted(set(errors))
+    return {
+        "oracle": "O1",
+        "ok": not errors,
+        "errors": errors,
+        "balances": [
+            {"item_id": item, "location_id": location, "quantity": qty}
+            for (item, location), qty in sorted(balances.items())
+        ],
+        "transfers": len(transfers),
+        "journal_entries": len(journal),
+    }
 
 
 def main() -> int:

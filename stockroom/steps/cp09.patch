@@ -1,0 +1,249 @@
+diff --git a/stockroom/backup.py b/stockroom/backup.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e18e3df87996f2bb7699241aaf33c06f3d39691b
+--- /dev/null
++++ b/stockroom/backup.py
+@@ -0,0 +1,115 @@
++"""CP09: capture and validate an online snapshot before making it selectable."""
++from contextlib import closing
++import hashlib
++import json
++from pathlib import Path
++import sqlite3
++from tempfile import TemporaryDirectory
++from time import monotonic, time_ns
++from uuid import uuid4
++
++from tools.e1 import inspect_connection
++
++from .environment import connect
++from .ledger import require_ledger
++from .operation import execute, parser
++from .writer import require_receipt_trigger, watermark
++
++
++def digest(path):
++    with path.open("rb") as handle:
++        return hashlib.file_digest(handle, "sha256").hexdigest()
++
++
++def validate(path):
++    with closing(connect(path, read_only=True)) as db:
++        db.execute("BEGIN")
++        state = require_ledger(db)
++        if state["schema_version"] != 2:
++            raise ValueError("backup or restore requires schema v2")
++        if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
++            raise ValueError("structural integrity check failed")
++        if db.execute("PRAGMA foreign_key_check").fetchall():
++            raise ValueError("foreign key check failed")
++        require_receipt_trigger(db)
++        state["watermark"] = watermark(db)
++        state["source_id"] = db.execute("SELECT sqlite_source_id()").fetchone()[0]
++        state["ledger"] = inspect_connection(db)
++    if not state["ledger"]["ok"]:
++        raise ValueError("ledger reconciliation failed")
++    return state
++
++
++def capture(path, parent, *, deadline_seconds=10, progress=None):
++    parent = parent.resolve(strict=True)
++    if not parent.is_dir() or not 0 < deadline_seconds <= 3600:
++        raise ValueError("invalid backup directory or deadline")
++    until = monotonic() + deadline_seconds
++    steps = 0
++
++    def observe(status, remaining, total):
++        nonlocal steps
++        steps += 1
++        if monotonic() >= until:
++            raise TimeoutError("backup deadline exceeded")
++        if progress:
++            progress(status, remaining, total)
++
++    with TemporaryDirectory(dir=parent, prefix=".stockroom-stage-") as temp:
++        stage = Path(temp) / "bundle"
++        stage.mkdir()
++        snapshot = stage / "ledger.db"
++        with closing(connect(path, read_only=True, timeout=0)) as src:
++            with closing(sqlite3.connect(snapshot, autocommit=True)) as dst:
++                src.backup(dst, pages=1, progress=observe, sleep=0.01)
++                if dst.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
++                    raise ValueError("could not finalize standalone destination")
++        state = validate(snapshot)
++        manifest = {key: state[key] for key in ("schema_version", "workspace_id", "watermark", "source_id")}
++        manifest.update(sha256=digest(snapshot), captured_at_ns=time_ns())
++        (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
++        published = parent / f"stockroom-backup-{uuid4().hex}"
++        # This is publication in a local directory, not an fsync durability protocol.
++        stage.rename(published)
++    return {"bundle": str(published), "steps": steps, "manifest": manifest}
++
++
++def verify_bundle(bundle):
++    if bundle.is_symlink() or not bundle.is_dir():
++        raise ValueError("expected a bundle directory")
++    file, metadata = bundle / "ledger.db", bundle / "manifest.json"
++    if any(p.is_symlink() or not p.is_file() for p in (file, metadata)):
++        raise ValueError("backup files must be regular files")
++    manifest = json.loads(metadata.read_text(encoding="utf-8"))
++    if not isinstance(manifest, dict) or type(manifest.get("captured_at_ns")) is not int:
++        raise ValueError("invalid manifest")
++    if digest(file) != manifest.get("sha256"):
++        raise ValueError("backup digest mismatch")
++    state = validate(file)
++    for key in ("schema_version", "workspace_id", "watermark"):
++        if state[key] != manifest.get(key):
++            raise ValueError(f"backup metadata mismatch: {key}")
++    return state, manifest
++
++
++def latest(parent, workspace_id):
++    candidates = []
++    for path in sorted(parent.glob("stockroom-backup-*")):
++        try:
++            state, manifest = verify_bundle(path)
++        except (ValueError, sqlite3.Error, OSError):
++            continue
++        if state["workspace_id"] == workspace_id:
++            candidates.append((state["watermark"], manifest["captured_at_ns"], path))
++    return max(candidates)[2] if candidates else None
++
++
++def main():
++    args = parser(__doc__)
++    args.add_argument("parent", type=Path, help="Existing directory where the verified bundle will appear")
++    options = args.parse_args()
++    return execute(lambda: capture(options.database, options.parent))
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/stockroom/test_backup.py b/stockroom/test_backup.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc900ce4c54d134598e7e1b3667d9708ec9dfde9
+--- /dev/null
++++ b/stockroom/test_backup.py
+@@ -0,0 +1,60 @@
++from contextlib import closing
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++
++from .backup import capture, latest, verify_bundle
++from .environment import connect, initialize_workspace
++from .ledger import initialize_ledger
++from .migrate import step
++from .storage import profile
++from .transfer import Transfer
++from .writer import install, submit
++
++
++def ready(root):
++    path = Path(initialize_workspace(root)["database"])
++    initialize_ledger(path)
++    profile(path, "wal")
++    install(path)
++    step(path, 10)
++    step(path, 10)
++    return path
++
++
++class BackupTests(unittest.TestCase):
++    def test_backup_under_write_and_interrupted_capture(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            path = ready(root)
++            written = []
++            def concurrent(_status, left, _total):
++                if left > 0 and not written:
++                    written.append(submit(path, Transfer("during", "item-bolt",
++                                                        "loc-north", "loc-south", 3)))
++            result = capture(path, root, progress=concurrent)
++            self.assertEqual(len(written), 1)
++            good = Path(result["bundle"])
++            state, manifest = verify_bundle(good)
++            self.assertEqual(state["watermark"], 1)
++            with closing(connect(good / "ledger.db", read_only=True)) as db:
++                self.assertEqual(db.execute("PRAGMA journal_mode").fetchone(), ("delete",))
++            def fail(*_):
++                raise RuntimeError("deliberate backup failure")
++            with self.assertRaisesRegex(RuntimeError, "deliberate"):
++                capture(path, root, progress=fail)
++            self.assertEqual(latest(root, manifest["workspace_id"]), good)
++            self.assertEqual(list(root.glob(".stockroom-stage-*")), [])
++
++    def test_receipt_trigger_missing_or_inert_refuses_publication(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            path = ready(root)
++            with closing(connect(path)) as db:
++                db.execute("DROP TRIGGER record_transfer_receipt")
++                with self.assertRaisesRegex(ValueError, "receipt trigger"):
++                    capture(path, root)
++                db.execute("CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer BEGIN SELECT 1; END")
++            with self.assertRaisesRegex(ValueError, "receipt trigger"):
++                capture(path, root)
++            self.assertEqual(list(root.glob("stockroom-backup-*")), [])
+diff --git a/stockroom/writer.py b/stockroom/writer.py
+index 670314106d80d102fee6f46578f590b601bfeb8d..401e40d634d82adc6f17b4653173f766455b78b6 100644
+--- a/stockroom/writer.py
++++ b/stockroom/writer.py
+@@ -12,18 +12,30 @@ from .operation import execute, parser
+ from .transfer import Transfer, apply_in_transaction
+ 
+ 
++RECEIPT_TRIGGER = """CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer
++BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END"""
++
++
++def require_receipt_trigger(db):
++    row = db.execute(
++        "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='record_transfer_receipt'"
++    ).fetchone()
++    if row is None or row[0].split() != RECEIPT_TRIGGER.split():
++        raise ValueError("receipt trigger is missing or differs from the Stockroom definition")
++
++
+ def install(path):
+     with closing(connect(path)) as db, write_transaction(db):
+         require_ledger(db)
+-        db.executescript("""
++        db.executescript(f"""
+             CREATE TABLE IF NOT EXISTS receipt(
+               seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
+             ) STRICT;
+             INSERT INTO receipt(transfer_id)
+               SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid;
+-            CREATE TRIGGER IF NOT EXISTS record_transfer_receipt AFTER INSERT ON transfer
+-            BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END;
++            {RECEIPT_TRIGGER.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1)};
+         """)
++        require_receipt_trigger(db)
+         return {"receipt_count": watermark(db)}
+ 
+ 
+@@ -36,6 +48,13 @@ def watermark(db):
+     return maximum
+ 
+ 
++def receipt_for(db, transfer_id):
++    row = db.execute("SELECT seq FROM receipt WHERE transfer_id=?", (transfer_id,)).fetchone()
++    if row is None:
++        raise ValueError("transfer did not produce a receipt")
++    return row[0]
++
++
+ def submit(path, request, wait_ms=500):
+     if type(wait_ms) is not int or not 0 <= wait_ms <= 60_000:
+         raise ValueError("wait-ms must be an integer from 0 to 60000")
+@@ -57,8 +76,7 @@ def submit(path, request, wait_ms=500):
+                         sequence = prior[4]
+                     else:
+                         apply_in_transaction(db, request)
+-                        sequence = db.execute("SELECT seq FROM receipt WHERE transfer_id=?",
+-                                              (request.id,)).fetchone()[0]
++                        sequence = receipt_for(db, request.id)
+             return {"id": request.id, "receipt": sequence, "replayed": prior is not None,
+                     "events": events}
+         except sqlite3.OperationalError as exc:
