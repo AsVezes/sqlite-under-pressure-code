@@ -13,14 +13,31 @@ SCHEMA_V1 = Path(__file__).with_name("schema_v1.sql")
 
 
 @contextmanager
-def write_transaction(db: sqlite3.Connection):
-    db.execute("BEGIN IMMEDIATE")
+def write_transaction(db: sqlite3.Connection, trace=None):
+    if db.in_transaction:
+        raise ValueError("write_transaction requires an idle connection")
+    phase = "begin"
+    if trace:
+        trace(phase)
     try:
+        db.execute("BEGIN IMMEDIATE")
+        phase = "work"
+        if trace:
+            trace(phase)
         yield
+        phase = "commit"
+        if trace:
+            trace(phase)
         db.execute("COMMIT")
-    except BaseException:
+        if trace:
+            trace("committed")
+    except BaseException as error:
+        if trace:
+            trace(phase + "_failed", error)
         if db.in_transaction:
             db.execute("ROLLBACK")
+            if trace:
+                trace("rolled_back")
         raise
 
 
