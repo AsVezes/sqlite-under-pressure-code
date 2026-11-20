@@ -243,15 +243,15 @@ class E1OracleTests(unittest.TestCase):
             connection.executescript("""
                 BEGIN;
                 INSERT INTO transfer VALUES
-                    ('tx-negative', 'item-bolt', 'loc-north', 'loc-south', -3);
-                UPDATE stock_balance SET quantity=13
+                    ('tx-negative', 'item-bolt', 'loc-north', 'loc-south', -1);
+                UPDATE stock_balance SET quantity=11
                     WHERE item_id='item-bolt' AND location_id='loc-north';
-                UPDATE stock_balance SET quantity= -1
+                UPDATE stock_balance SET quantity=1
                     WHERE item_id='item-bolt' AND location_id='loc-south';
                 INSERT INTO journal_entry
                     (transfer_id, item_id, location_id, delta) VALUES
-                    ('tx-negative', 'item-bolt', 'loc-north', 3),
-                    ('tx-negative', 'item-bolt', 'loc-south', -3);
+                    ('tx-negative', 'item-bolt', 'loc-north', 1),
+                    ('tx-negative', 'item-bolt', 'loc-south', -1);
                 COMMIT;
             """)
         finally:
