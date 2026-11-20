@@ -47,6 +47,22 @@ class E1OracleTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             e1.initialize(self.path)
 
+    def test_failed_initialization_removes_partial_fixture(self):
+        from unittest.mock import patch
+
+        broken = Path(self.workspace.name) / "broken fixture.sqlite"
+        invalid_sql = Path(self.workspace.name) / "invalid.sql"
+        invalid_sql.write_text(
+            "CREATE TABLE partial(id INTEGER);\\nINVALID SQL;\\n",
+            encoding="utf-8",
+        )
+        with patch.object(e1, "SCHEMA", invalid_sql):
+            with self.assertRaises(sqlite3.Error):
+                e1.initialize(broken)
+        self.assertFalse(broken.exists())
+        # Failure must not affect the independently initialized baseline.
+        self.assertTrue(e1.inspect(self.path)["ok"])
+
     def test_missing_file_is_not_created_by_checker(self):
         missing = Path(self.workspace.name) / "missing.sqlite"
         with self.assertRaises(FileNotFoundError):
