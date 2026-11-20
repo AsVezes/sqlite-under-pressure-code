@@ -30,3 +30,13 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["sha256"], measure(self.path, "item-bolt")["sha256"])
         self.assertEqual(measure(self.path, "missing")["rows"], [])
         self.assertEqual(len(report["samples_ns"]), 3)
+
+    def test_compare_uses_separate_copies_for_read_write_cost(self):
+        from .tune import compare
+        from .ledger import check_ledger
+        before = check_ledger(self.path)
+        result = compare(self.path, 2)
+        for plain, indexed in zip(result["plain"]["reports"], result["indexed"]["reports"]):
+            self.assertEqual(plain["sha256"], indexed["sha256"])
+        self.assertEqual(len(result["indexed"]["write_samples_ns"]), 8)
+        self.assertEqual(check_ledger(self.path), before)
