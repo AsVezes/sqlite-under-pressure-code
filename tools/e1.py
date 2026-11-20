@@ -136,7 +136,7 @@ def inspect(path: Path) -> dict:
             # CHECK constraints can be bypassed by an external connection.
             # A self-transfer or nonpositive amount must never pass O1 merely
             # because its journal and projected balances reconcile.
-            if source == destination or not 1 <= quantity <= 1000000000:
+            if not transfer_id.strip() or source == destination or not 1 <= quantity <= 1000000000:
                 errors.append("O1_INVALID_TRANSFER:" + transfer_id)
             expected = sorted([
                 (item, source, -quantity),
