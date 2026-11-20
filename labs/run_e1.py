@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run E1 standalone pilots with reproducible raw evidence.
+"""Run E1 standalone pilots with reproducible raw evidence (L05/L09/L10/L11).
 
 Run from any directory: python3 labs/run_e1.py
 All pilots own their disposable SQLite fixtures. This runner never accepts a DB path.
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent
-PILOTS = ("l05_atomicity", "l10_writer_busy", "l11_stale_snapshot")
+PILOTS = ("l05_atomicity", "l09_wal_views", "l10_writer_busy", "l11_stale_snapshot")
 COMMAND_TIMEOUT_SECONDS = 120
 
 
