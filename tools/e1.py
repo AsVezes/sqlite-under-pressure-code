@@ -78,6 +78,25 @@ def inspect(path: Path) -> dict:
             "SELECT transfer_id, item_id, location_id, delta "
             "FROM journal_entry ORDER BY transfer_id, id"
         ))
+        # SQLite's INTEGER affinity and CHECK(quantity >= 0) can still store
+        # nonnumeric TEXT. Never allow Python arithmetic or comparisons to
+        # misclassify such rows or turn an oracle failure into a traceback.
+        quantities = (
+            list(opening.values())
+            + list(balances.values())
+            + [row[4] for row in transfers]
+            + [row[3] for row in journal]
+        )
+        if any(type(quantity) is not int for quantity in quantities):
+            errors.append("O1_NONINTEGER_QUANTITY")
+            return {
+                "oracle": "O1",
+                "ok": False,
+                "errors": sorted(set(errors)),
+                "balances": [],
+                "transfers": len(transfers),
+                "journal_entries": len(journal),
+            }
         entries_by_transfer = {}
         deltas = {}
         for transfer_id, item, location, delta in journal:
