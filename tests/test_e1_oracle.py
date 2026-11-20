@@ -181,6 +181,28 @@ class E1OracleTests(unittest.TestCase):
         self.assertTrue(any(error.startswith("O1_BALANCE_MISMATCH:")
                             for error in result["errors"]))
 
+    def test_orphan_journal_is_reported_with_foreign_keys_disabled(self):
+        # Deliberately bypass connection-level FK enforcement to simulate an
+        # externally damaged database. O1 must report both independent signals.
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 0)
+            connection.execute(
+                """INSERT INTO journal_entry
+                   (transfer_id, item_id, location_id, delta)
+                   VALUES ('tx-orphan', 'item-bolt', 'loc-north', -1)"""
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_FOREIGN_KEY", result["errors"])
+        self.assertIn("O1_ORPHAN_JOURNAL:tx-orphan", result["errors"])
+        self.assertIn(
+            "O1_BALANCE_MISMATCH:item-bolt:loc-north", result["errors"]
+        )
+
     def test_balances_without_journal_fail_even_if_total_conserved(self):
         self.sql("""
             UPDATE stock_balance SET quantity = 9
