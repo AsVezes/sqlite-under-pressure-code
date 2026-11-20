@@ -58,6 +58,7 @@ def run():
             b_active_after_error = b.in_transaction
             a.execute("COMMIT")
             events.append({"phase": "A_COMMIT_ACK"})
+            after_a = b.execute("SELECT n FROM counter WHERE id=1").fetchone()[0]
             b.execute("BEGIN IMMEDIATE")
             b.execute("UPDATE counter SET n=n+1 WHERE id=1")
             b.execute("COMMIT")
@@ -67,7 +68,7 @@ def run():
             oracles = {
                 "writer_contention_is_busy": busy is not None and busy["code"] == sqlite3.SQLITE_BUSY,
                 "busy_did_not_start_transaction": not b_active_after_error,
-                "first_commit_visible": final == 2,
+                "first_commit_visible": after_a == 1,
                 "retry_committed_once": final == 2,
                 "structural_integrity": integrity == "ok",
                 "ack_sequence": [e["phase"] for e in events] == [
@@ -80,7 +81,7 @@ def run():
                 "environment": {"python": sys.version, "platform": platform.platform(), **identity},
                 "events": events,
                 "observations": {"b_in_transaction_after_busy": b_active_after_error,
-                                 "final_counter": final, "integrity_check": integrity},
+                                 "after_a_commit": after_a, "final_counter": final, "integrity_check": integrity},
                 "oracles": oracles,
                 "limitations": [
                     "Single-process, two-connection sequential protocol; not scheduling stress",
