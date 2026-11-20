@@ -52,7 +52,7 @@ class F3PreflightTests(unittest.TestCase):
         self.assertEqual(len(result["locations"]), 2)
 
     def test_invalid_and_empty_codes_are_rejected(self):
-        for code in ("   ", "Café", "NORTH\\t", "NORTH_1"):
+        for code in ("   ", "Café", "NORTH\t", "NORTH\n", "NORTH_1"):
             with self.subTest(code=code):
                 self.update("UPDATE location SET code = ? WHERE id = 'loc-south'", (code,))
                 result = f3.inspect(self.path)
