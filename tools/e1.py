@@ -17,12 +17,18 @@ def initialize(path: Path) -> None:
     """Initialize only a previously nonexistent file (O_EXCL prevents overwrite)."""
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
-    connection = sqlite3.connect(path)
     try:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.executescript(SCHEMA.read_text(encoding="utf-8"))
-    finally:
-        connection.close()
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.executescript(SCHEMA.read_text(encoding="utf-8"))
+        finally:
+            connection.close()
+    except BaseException:
+        # The exclusive file belongs to this initializer. Do not leave a
+        # half-created fixture that a later pilot could mistake for F1.
+        path.unlink(missing_ok=True)
+        raise
 
 
 def create() -> dict:
