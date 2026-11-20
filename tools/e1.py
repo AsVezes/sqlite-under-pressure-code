@@ -107,6 +107,12 @@ def inspect(path: Path) -> dict:
                 "transfers": len(transfers),
                 "journal_entries": len(journal),
             }
+        # A damaged or externally edited database can bypass CHECK constraints.
+        # Matching negative opening/current balances must never pass O1.
+        if any(quantity < 0 for quantity in opening.values()) or any(
+            quantity < 0 for quantity in balances.values()
+        ):
+            errors.append("O1_NEGATIVE_QUANTITY")
         entries_by_transfer = {}
         deltas = {}
         for transfer_id, item, location, delta in journal:
