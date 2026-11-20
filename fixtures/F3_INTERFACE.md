@@ -15,7 +15,7 @@ The preflight opens an existing file with SQLite URI `mode=ro`, sets
 `query_only`, starts one read transaction, and returns JSON with the current
 `user_version`, each stable location ID and proposed canonical code.
 Exit 0 means the *location-code preflight only* passed; exit 1 means invalid
-or colliding codes; exit 2 means the file could not be read or queried.
+or colliding codes **or a future `user_version` greater than 1**; exit 2 means the file could not be read or queried. A future version is rejected with `F3_FUTURE_VERSION` before querying historical `location` columns; this preflight is not a general schema-version compatibility checker.
 
 **Candidate normalization for F3:** trim ASCII space (U+0020) at both ends,
 uppercase ASCII a–z, then permit only ASCII letters, digits and hyphen.
