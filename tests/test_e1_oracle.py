@@ -53,7 +53,7 @@ class E1OracleTests(unittest.TestCase):
         broken = Path(self.workspace.name) / "broken fixture.sqlite"
         invalid_sql = Path(self.workspace.name) / "invalid.sql"
         invalid_sql.write_text(
-            "CREATE TABLE partial(id INTEGER);\\nINVALID SQL;\\n",
+            "CREATE TABLE partial(id INTEGER);\nINVALID SQL;\n",
             encoding="utf-8",
         )
         with patch.object(e1, "SCHEMA", invalid_sql):
