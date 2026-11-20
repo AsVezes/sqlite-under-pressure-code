@@ -15,15 +15,17 @@ DATABASE_NAME = "stockroom ledger.sqlite3"
 APPLICATION_ID = 0x534C4544
 
 
-def connect(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
+def connect(path: Path, *, read_only: bool = False, timeout: float = 5.0) -> sqlite3.Connection:
     """Open an existing database with SQL-controlled transactions."""
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"Expected an existing, regular database file: {path}")
     mode = "ro" if read_only else "rw"
     uri = path.resolve(strict=True).as_uri() + "?mode=" + mode
-    db = sqlite3.connect(uri, uri=True, autocommit=True)
+    db = sqlite3.connect(uri, uri=True, autocommit=True, timeout=timeout)
     try:
         db.execute("PRAGMA foreign_keys=ON")
+        if not read_only:
+            db.execute("PRAGMA synchronous=FULL")
         if db.execute("PRAGMA foreign_keys").fetchone() != (1,):
             raise RuntimeError("SQLite foreign key enforcement is unavailable")
     except BaseException:
