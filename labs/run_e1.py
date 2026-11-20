@@ -48,12 +48,15 @@ def run_one(name):
                 try:
                     payload = json.loads(process.stdout)
                     oracles = payload.get("oracles")
+                    identity = payload.get("environment", payload)
+                    if not isinstance(identity, dict):
+                        identity = {}
                     if (payload.get("status") != "pass"
                             or not isinstance(oracles, dict)
                             or not oracles
                             or not all(value is True for value in oracles.values())
-                            or not payload.get("sqlite_source_id")
-                            or not payload.get("sqlite_version")):
+                            or not identity.get("sqlite_source_id")
+                            or not identity.get("sqlite_version")):
                         record["error"] = "invalid probe evidence"
                         record["ok"] = False
                 except (ValueError, TypeError, AttributeError):
