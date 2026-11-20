@@ -260,6 +260,26 @@ class E1OracleTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("O1_INVALID_TRANSFER:tx-negative", result["errors"])
 
+    def test_transfer_above_schema_limit_is_rejected_with_check_bypassed(self):
+        # O1 must enforce the same quantity ceiling as the pilot schema,
+        # even if an external writer disabled CHECK constraints.
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            self.assertEqual(
+                connection.execute("PRAGMA ignore_check_constraints").fetchone()[0], 1
+            )
+            connection.execute(
+                "INSERT INTO transfer VALUES "
+                "('tx-oversized', 'item-bolt', 'loc-north', 'loc-south', 1000000001)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_INVALID_TRANSFER:tx-oversized", result["errors"])
+
     def test_self_transfer_bypassing_check_is_rejected_even_if_reconciled(self):
         # A self-transfer can have a balanced +q/-q journal at one location
         # when CHECK and UNIQUE are bypassed in an externally edited database.
