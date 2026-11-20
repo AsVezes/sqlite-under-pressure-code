@@ -31,7 +31,19 @@ R2's independent `fixtures/e1_f1.sql` and `tools/e1.py` provide a disposable two
 
 ## Additional E1 laboratory pilots and tests
 
-The runner covers **L05 atomicity, L09 WAL visibility, L10 WAL checkpoint progress, and L11 stale snapshots**, plus a separate writer-contention probe with the legacy filename `l10_writer_busy.py`. [Additional E1 integration probes](integration/README.md) cover process interruption, logical capacity, and selected backup/restore cases. The full E1 gate and cumulative checkpoints require further evidence.
+The E1 runner currently invokes **seven standalone pilots** (exactly as listed in `labs/run_e1.py`):
+
+1. `l05_atomicity` — L05 transaction atomicity
+2. `l08_rollback_recovery` — L08 rollback-journal recovery
+3. `l08_spill_controls` — L08 spill, interruption, and commit controls (indirect spill inference)
+4. `l09_wal_views` — L09 WAL reader visibility
+5. `l10_checkpoint` — canonical L10 WAL checkpoint progress
+6. `l10_writer_busy` — **supplemental legacy-named** writer contention; not canonical L10
+7. `l11_stale_snapshot` — L11 stale snapshot behavior
+
+These are seven **probes**, not seven independently accepted labs. `labs/l12_busy_locked.py` is a separate L12 pilot **not included** in this runner. See [the Stockroom Ledger checkpoint guide](stockroom/CHECKPOINTS.md) for **CP00–CP11**: it distinguishes historical output snapshots, the cumulative same-database build-along, and the numbered patches under [`stockroom/steps/`](stockroom/steps/). The patches are historical development artifacts; they can include incidental files outside the teaching step (notably CP03), so do not treat a patch as a minimal chapter exercise or a verified acceptance gate.
+
+ [Additional E1 integration probes](integration/README.md) cover process interruption, logical capacity, and selected backup/restore cases. The full E1 gate and cumulative checkpoints require further evidence.
 
 From the repository root, in a local environment suitable for the experiments:
 
