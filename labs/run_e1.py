@@ -88,7 +88,8 @@ def main():
                   "Tests and probes run in separate processes and separate disposable fixtures",
                   "This runner does not prove cross-process concurrency or crash durability",
                   "Each subprocess has a 120-second safety timeout; a timeout is failure, not evidence",
-                  "The legacy l10_writer_busy is a writer-contention pilot, not the editorial L10 checkpoint",\n                  "Execution results are environment-specific; independent review is required",
+                  "The legacy l10_writer_busy is a writer-contention pilot, not the editorial L10 checkpoint",
+                  "Execution results are environment-specific; independent review is required",
               ]}
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0 if all(item["ok"] for item in results) else 1
