@@ -25,6 +25,9 @@ def inspect(path):
         con.execute("PRAGMA query_only=ON")
         con.execute("BEGIN")
         version = con.execute("PRAGMA user_version").fetchone()[0]
+        if version > 1:
+            return {"fixture": "F3", "ok": False, "user_version": version,
+                    "locations": [], "issues": [{"code": "F3_FUTURE_VERSION"}]}
         rows = con.execute("SELECT id, code FROM location ORDER BY id").fetchall()
         seen = {}
         issues = []
