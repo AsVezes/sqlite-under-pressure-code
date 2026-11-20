@@ -15,7 +15,8 @@ class RunnerSupervisionTests(unittest.TestCase):
     def test_e1_manifest_covers_wal_visibility_and_contention(self):
         self.assertEqual(
             run_e1.PILOTS,
-            ("l05_atomicity", "l09_wal_views", "l10_checkpoint", "l10_writer_busy", "l11_stale_snapshot"),
+            ("l05_atomicity", "l08_rollback_recovery", "l08_spill_controls",
+             "l09_wal_views", "l10_checkpoint", "l10_writer_busy", "l11_stale_snapshot"),
         )
         for name in run_e1.PILOTS:
             with self.subTest(lab=name):
