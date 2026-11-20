@@ -12,6 +12,42 @@ For direct entry, download the relevant output commit and follow its [command gu
 
 These development snapshots require execution and independent review.
 
+## CP03 patch: historical integration versus the chapter exercise
+
+The CP03 build-along patch is an **exact integration delta**, not a list of
+seventeen new concepts to learn in C08. It includes work that landed in the
+public kit between the CP02 and CP03 source snapshots. Preserve those files
+when applying the patch: deleting them or applying only the three Ledger
+modules would produce a different tree from the published checkpoint and
+invalidate the later patch chain.
+
+For the **C08/CP03 exercise**, focus on `stockroom/storage.py`,
+`stockroom/environment.py`, `stockroom/operation.py` and
+`stockroom/test_storage.py`: choose the journal mode, observe the resulting
+mode, and verify that the existing Ledger still passes its checks. The patch
+also updates this checkpoint guide.
+
+The remaining files are **integration prerequisites, not CP03 learning
+objectives**:
+
+- `labs/l08_rollback_recovery.py`, `labs/l08_spill_controls.py`, their
+  tests and `labs/run_e1.py`/`labs/test_run_e1.py` support the separate
+  L08 pilot and its runner. They are not extra CP03 implementation steps.
+- `labs/l12_busy_locked.py` and `labs/test_l12_busy_locked.py` support
+  L12, taught with contention/retry later in the course (C11/CP04).
+- `fixtures/F3_INTERFACE.md`, `fixtures/f3_preflight.py`,
+  `tests/test_f3_nontext.py` and `tests/test_f3_preflight.py` are
+  historical-code migration **preflight** materials. They are not a
+  completed migration, O3 acceptance, or a requirement to teach migration
+  in C08. Migration belongs to C19/CP08.
+
+The build-along rule is therefore: **apply the complete CP03 patch exactly
+once, run the available checks, but explain and exercise only the C08
+journal-profile changes here**. Do not silently remove the incidental files
+or relabel their exercises as CP03. They remain in the tree for later use.
+The recorded patch/tree chain has not been rewritten by this clarification.
+Passing the tests in one environment is not independent acceptance of CP03.
+
 ## CP03–CP11 · Continue with the same database
 
 Start from the CP02 database and keep its absolute path. Use the build-along below, or use an output snapshot for direct entry. Run the command from that snapshot's repository root.
