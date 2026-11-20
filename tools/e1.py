@@ -58,6 +58,10 @@ def inspect(path: Path) -> dict:
     connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         connection.execute("PRAGMA query_only = ON")
+        # One read transaction pins a consistent snapshot across all O1 queries.
+        # In WAL mode a writer may commit between SELECTs; without BEGIN the
+        # oracle could combine balances and journal from different commits.
+        connection.execute("BEGIN")
         errors = []
         integrity = [r[0] for r in connection.execute("PRAGMA quick_check")]
         if integrity != ["ok"]:
