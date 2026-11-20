@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s labs -p 'test_run_e1.py' -v
 Mocks replace subprocess execution: no database, process or filesystem fault is induced.
 """
+import json
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -22,7 +23,7 @@ class RunnerSupervisionTests(unittest.TestCase):
                 self.assertTrue((run_e1.ROOT / ("test_" + name + ".py")).is_file())
 
     def test_success_requires_both_child_exit_codes_zero(self):
-        completed = subprocess.CompletedProcess(["python"], 0, stdout="{}", stderr="")
+        completed = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr="")
         with patch.object(run_e1.subprocess, "run", return_value=completed) as call:
             result = run_e1.run_one("l05_atomicity")
         self.assertTrue(result["ok"])
@@ -48,7 +49,7 @@ class RunnerSupervisionTests(unittest.TestCase):
         timed_out = subprocess.TimeoutExpired(
             cmd=["python"], timeout=120, output=b"partial stdout", stderr=b"partial stderr"
         )
-        completed = subprocess.CompletedProcess(["python"], 0, stdout="{}", stderr="")
+        completed = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr="")
         with patch.object(run_e1.subprocess, "run", side_effect=[timed_out, completed]):
             result = run_e1.run_one("l05_atomicity")
         self.assertFalse(result["ok"])
@@ -60,12 +61,34 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertEqual(first["stderr"], "partial stderr")
 
     def test_launch_failure_does_not_abort_next_child(self):
-        completed = subprocess.CompletedProcess(["python"], 0, stdout="{}", stderr="")
+        completed = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr="")
         with patch.object(run_e1.subprocess, "run", side_effect=[OSError("launch refused"), completed]):
             result = run_e1.run_one("l05_atomicity")
         self.assertFalse(result["ok"])
         self.assertEqual(result["commands"][0]["error"], "OSError")
         self.assertEqual(len(result["commands"]), 2)
+
+
+    def test_zero_exit_with_failed_oracle_is_rejected(self):
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        bad = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "fail", "oracles": {"valid": False},
+                               "sqlite_source_id": "test-id", "sqlite_version": "test-version"}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[good, bad]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
+
+    def test_zero_exit_with_unparseable_probe_is_rejected(self):
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        bad = subprocess.CompletedProcess(["python"], 0, stdout="not-json", stderr="")
+        with patch.object(run_e1.subprocess, "run", side_effect=[good, bad]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][1]["error"], "invalid probe JSON")
 
 
 if __name__ == "__main__":
