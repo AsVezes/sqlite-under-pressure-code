@@ -117,6 +117,27 @@ class E1OracleTests(unittest.TestCase):
         self.assertEqual(result["transfers"], 1)
         self.assertEqual(result["journal_entries"], 2)
 
+    def test_empty_transfer_identifier_is_rejected_even_when_reconciled(self):
+        # SQLite permits an empty TEXT primary key. The journal and balances
+        # can reconcile, but an empty operation identifier is not valid.
+        self.sql("""
+            BEGIN;
+            INSERT INTO transfer VALUES
+                ('', 'item-bolt', 'loc-north', 'loc-south', 1);
+            UPDATE stock_balance SET quantity = 9
+                WHERE item_id = 'item-bolt' AND location_id = 'loc-north';
+            UPDATE stock_balance SET quantity = 3
+                WHERE item_id = 'item-bolt' AND location_id = 'loc-south';
+            INSERT INTO journal_entry
+                (transfer_id, item_id, location_id, delta) VALUES
+                ('', 'item-bolt', 'loc-north', -1),
+                ('', 'item-bolt', 'loc-south', 1);
+            COMMIT;
+        """)
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_INVALID_TRANSFER:", result["errors"])
+
     def test_transfer_without_journal_is_rejected(self):
         self.sql("""
             INSERT INTO transfer VALUES
