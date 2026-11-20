@@ -42,8 +42,24 @@ def run_one(name):
                 encoding="utf-8", errors="replace", check=False,
                 timeout=COMMAND_TIMEOUT_SECONDS,
             )
-            results.append({"argv": argv, "exit_code": process.returncode,
-                            "stdout": process.stdout, "stderr": process.stderr})
+            record = {"argv": argv, "exit_code": process.returncode,
+                      "stdout": process.stdout, "stderr": process.stderr}
+            if argv == commands[1] and process.returncode == 0:
+                try:
+                    payload = json.loads(process.stdout)
+                    oracles = payload.get("oracles")
+                    if (payload.get("status") != "pass"
+                            or not isinstance(oracles, dict)
+                            or not oracles
+                            or not all(value is True for value in oracles.values())
+                            or not payload.get("sqlite_source_id")
+                            or not payload.get("sqlite_version")):
+                        record["error"] = "invalid probe evidence"
+                        record["ok"] = False
+                except (ValueError, TypeError, AttributeError):
+                    record["error"] = "invalid probe JSON"
+                    record["ok"] = False
+            results.append(record)
         except subprocess.TimeoutExpired as exc:
             # Do not report a timed-out or killed child as a successful experiment.
             results.append({"argv": argv, "exit_code": None, "ok": False,
@@ -56,7 +72,7 @@ def run_one(name):
     return {"lab": name, "sha256": {
         source.name: hashlib.sha256(source.read_bytes()).hexdigest(),
         test.name: hashlib.sha256(test.read_bytes()).hexdigest()},
-        "commands": results, "ok": all(r["exit_code"] == 0 for r in results)}
+        "commands": results, "ok": all(r["exit_code"] == 0 and r.get("ok", True) for r in results)}
 
 
 def main():
