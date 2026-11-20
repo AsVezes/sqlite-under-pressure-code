@@ -260,6 +260,30 @@ class E1OracleTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("O1_INVALID_TRANSFER:tx-negative", result["errors"])
 
+    def test_self_transfer_bypassing_check_is_rejected_even_if_reconciled(self):
+        # A self-transfer can have a balanced +q/-q journal at one location
+        # when CHECK and UNIQUE are bypassed in an externally edited database.
+        # Here a single entry cannot represent both legs; O1 must reject the
+        # transfer independently of the journal-pair diagnosis.
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            self.assertEqual(
+                connection.execute("PRAGMA ignore_check_constraints").fetchone()[0],
+                1,
+            )
+            connection.execute(
+                "INSERT INTO transfer VALUES "
+                "('tx-self', 'item-bolt', 'loc-north', 'loc-north', 1)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_INVALID_TRANSFER:tx-self", result["errors"])
+        self.assertIn("O1_JOURNAL_PAIR:tx-self", result["errors"])
+
     def test_balances_without_journal_fail_even_if_total_conserved(self):
         self.sql("""
             UPDATE stock_balance SET quantity = 9
