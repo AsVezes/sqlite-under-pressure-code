@@ -1,0 +1,62 @@
+"""Regression tests for the E1 runner's process-supervision contract.
+
+Run: python3 -m unittest discover -s labs -p 'test_run_e1.py' -v
+Mocks replace subprocess execution: no database, process or filesystem fault is induced.
+"""
+import subprocess
+import unittest
+from unittest.mock import patch
+
+import run_e1
+
+
+class RunnerSupervisionTests(unittest.TestCase):
+    def test_success_requires_both_child_exit_codes_zero(self):
+        completed = subprocess.CompletedProcess(["python"], 0, stdout="{}", stderr="")
+        with patch.object(run_e1.subprocess, "run", return_value=completed) as call:
+            result = run_e1.run_one("l05_atomicity")
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["commands"]), 2)
+        self.assertTrue(all(row["exit_code"] == 0 for row in result["commands"]))
+        self.assertEqual(call.call_count, 2)
+        for args, kwargs in call.call_args_list:
+            self.assertFalse(kwargs.get("shell", False))
+            self.assertEqual(kwargs["timeout"], run_e1.COMMAND_TIMEOUT_SECONDS)
+            self.assertEqual(kwargs["cwd"], run_e1.ROOT)
+
+    def test_nonzero_child_is_not_success(self):
+        outcomes = [
+            subprocess.CompletedProcess(["python"], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess(["python"], 1, stdout="", stderr="failed"),
+        ]
+        with patch.object(run_e1.subprocess, "run", side_effect=outcomes):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual([x["exit_code"] for x in result["commands"]], [0, 1])
+
+    def test_timeout_keeps_partial_output_and_continues(self):
+        timed_out = subprocess.TimeoutExpired(
+            cmd=["python"], timeout=120, output=b"partial stdout", stderr=b"partial stderr"
+        )
+        completed = subprocess.CompletedProcess(["python"], 0, stdout="{}", stderr="")
+        with patch.object(run_e1.subprocess, "run", side_effect=[timed_out, completed]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["commands"]), 2)
+        first = result["commands"][0]
+        self.assertEqual(first["error"], "timeout")
+        self.assertIsNone(first["exit_code"])
+        self.assertEqual(first["stdout"], "partial stdout")
+        self.assertEqual(first["stderr"], "partial stderr")
+
+    def test_launch_failure_does_not_abort_next_child(self):
+        completed = subprocess.CompletedProcess(["python"], 0, stdout="{}", stderr="")
+        with patch.object(run_e1.subprocess, "run", side_effect=[OSError("launch refused"), completed]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][0]["error"], "OSError")
+        self.assertEqual(len(result["commands"]), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
