@@ -6,7 +6,7 @@ import sqlite3
 from time import monotonic, sleep
 
 from .environment import connect
-from .ledger import require_version, write_transaction
+from .ledger import require_ledger, write_transaction
 from .observe import event
 from .operation import execute, parser
 from .transfer import Transfer, apply_in_transaction
@@ -14,7 +14,7 @@ from .transfer import Transfer, apply_in_transaction
 
 def install(path):
     with closing(connect(path)) as db, write_transaction(db):
-        require_version(db, 1)
+        require_ledger(db)
         db.executescript("""
             CREATE TABLE IF NOT EXISTS receipt(
               seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
@@ -45,7 +45,7 @@ def submit(path, request, wait_ms=500):
         try:
             with closing(connect(path, timeout=0)) as db:
                 with write_transaction(db, lambda phase, error=None: event(events, phase, error)):
-                    require_version(db, 1)
+                    require_ledger(db)
                     prior = db.execute(
                         "SELECT t.item_id,t.source_location_id,t.destination_location_id,t.quantity,r.seq "
                         "FROM transfer t JOIN receipt r ON r.transfer_id=t.id WHERE t.id=?", (request.id,)

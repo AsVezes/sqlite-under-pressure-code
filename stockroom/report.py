@@ -6,7 +6,7 @@ from statistics import median
 from time import perf_counter_ns
 
 from .environment import connect
-from .ledger import require_version
+from .ledger import require_ledger
 from .operation import execute, parser
 
 QUERY = (
@@ -21,7 +21,7 @@ def measure(path, item, repeats=1):
         raise ValueError("repeats must be between 1 and 100")
     with closing(connect(path, read_only=True)) as db:
         db.execute("BEGIN")
-        require_version(db, 1)
+        require_ledger(db)
         samples = []
         rows = None
         for _ in range(repeats):

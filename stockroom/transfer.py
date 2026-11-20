@@ -7,7 +7,7 @@ import re
 import sqlite3
 
 from .environment import connect
-from .ledger import require_version, write_transaction
+from .ledger import require_ledger, write_transaction
 
 
 MAX_TRANSFER = 1_000_000_000
@@ -40,7 +40,7 @@ def apply_in_transaction(
     """Apply one transfer within a caller-owned write transaction using a savepoint."""
     if not db.in_transaction or db.execute("PRAGMA foreign_keys").fetchone() != (1,):
         raise ValueError("Transfer requires an active transaction with foreign keys enabled")
-    require_version(db, 1)
+    require_ledger(db)
     db.execute("SAVEPOINT stockroom_transfer")
     try:
         db.execute(

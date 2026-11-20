@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from time import perf_counter_ns
 
 from .environment import connect
-from .ledger import check_ledger, require_version, write_transaction
+from .ledger import check_ledger, require_ledger, write_transaction
 from .operation import execute, parser
 from .report import measure
 from .transfer import Transfer
@@ -24,7 +24,7 @@ def copy_database(source, destination):
 def index(path, enabled):
     with closing(connect(path)) as db:
         with write_transaction(db):
-            require_version(db, 1)
+            require_ledger(db)
             if enabled:
                 db.execute(f"CREATE INDEX IF NOT EXISTS {INDEX} "
                            "ON transfer(item_id,destination_location_id,id)")

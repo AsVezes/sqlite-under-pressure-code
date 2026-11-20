@@ -3,7 +3,7 @@ from contextlib import closing
 from time import monotonic_ns
 
 from .environment import connect
-from .ledger import require_version
+from .ledger import require_ledger
 from .operation import execute, parser
 from .storage import current
 
@@ -20,7 +20,7 @@ def event(events, phase, error=None):
 
 def observe(path):
     with closing(connect(path)) as db:
-        require_version(db, 1)
+        require_ledger(db)
         state = current(db)
         busy, frames, backfilled = db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         return {"profile": state, "checkpoint": {

@@ -50,6 +50,13 @@ def require_version(db: sqlite3.Connection, version: int) -> dict:
     return details
 
 
+def require_ledger(db: sqlite3.Connection) -> dict:
+    details = identity(db)
+    if details["schema_version"] not in (1, 2):
+        raise ValueError(f"Unsupported Stockroom Ledger schema v{details['schema_version']}")
+    return details
+
+
 def seed_f1(db: sqlite3.Connection) -> None:
     # Load the shared pilot in memory and copy just its stable opening data.
     # Application DDL and constraints come from schema_v1.sql.
@@ -85,5 +92,5 @@ def initialize_ledger(path: Path) -> dict:
 
 def check_ledger(path: Path) -> dict:
     with closing(connect(path, read_only=True)) as db:
-        require_version(db, 1)
+        require_ledger(db)
     return e1.inspect(path)

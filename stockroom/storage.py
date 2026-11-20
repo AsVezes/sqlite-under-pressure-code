@@ -2,7 +2,7 @@
 from contextlib import closing
 
 from .environment import connect
-from .ledger import require_version
+from .ledger import require_ledger
 from .operation import execute, parser
 
 
@@ -14,7 +14,7 @@ def current(db):
 
 def profile(path, journal=None):
     with closing(connect(path)) as db:
-        require_version(db, 1)
+        require_ledger(db)
         if journal is not None:
             if journal not in ("delete", "wal"):
                 raise ValueError("expected delete or wal")
