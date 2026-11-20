@@ -101,6 +101,43 @@ class E1OracleTests(unittest.TestCase):
         self.assertEqual(result["transfers"], 1)
         self.assertEqual(result["journal_entries"], 2)
 
+    def test_transfer_without_journal_is_rejected(self):
+        self.sql("""
+            INSERT INTO transfer VALUES
+                ('tx-missing', 'item-bolt', 'loc-north', 'loc-south', 3);
+        """)
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_JOURNAL_PAIR:tx-missing", result["errors"])
+
+    def test_wrong_journal_pair_is_rejected_even_when_balances_match(self):
+        self.sql("""
+            BEGIN;
+            INSERT INTO transfer VALUES
+                ('tx-wrong', 'item-bolt', 'loc-north', 'loc-south', 3);
+            UPDATE stock_balance SET quantity = 7
+                WHERE item_id = 'item-bolt' AND location_id = 'loc-north';
+            UPDATE stock_balance SET quantity = 5
+                WHERE item_id = 'item-bolt' AND location_id = 'loc-south';
+            INSERT INTO journal_entry
+                (transfer_id, item_id, location_id, delta) VALUES
+                ('tx-wrong', 'item-bolt', 'loc-north', -2),
+                ('tx-wrong', 'item-bolt', 'loc-south', 2);
+            COMMIT;
+        """)
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_JOURNAL_PAIR:tx-wrong", result["errors"])
+        self.assertTrue(any(error.startswith("O1_BALANCE_MISMATCH:")
+                            for error in result["errors"]))
+
+    def test_checker_does_not_change_database_bytes(self):
+        before = self.path.read_bytes()
+        result = e1.inspect(self.path)
+        after = self.path.read_bytes()
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertEqual(before, after)
+
     def test_balances_without_journal_fail_even_if_total_conserved(self):
         self.sql("""
             UPDATE stock_balance SET quantity = 9
