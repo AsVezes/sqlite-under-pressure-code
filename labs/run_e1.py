@@ -7,7 +7,6 @@ Output is JSON on stdout; redirect to a file outside the repository if retention
 """
 import hashlib
 import json
-import os
 from pathlib import Path
 import platform
 import subprocess
@@ -15,6 +14,13 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 PILOTS = ("l05_atomicity", "l10_writer_busy", "l11_stale_snapshot")
+COMMAND_TIMEOUT_SECONDS = 120
+
+
+def _decoded(value):
+    if value is None:
+        return ""
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
 
 
 def run_one(name):
@@ -30,10 +36,23 @@ def run_one(name):
     results = []
     for argv in commands:
         # No shell, no arbitrary DB path, no inherited working directory.
-        process = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True,
-                                 encoding="utf-8", errors="replace", check=False)
-        results.append({"argv": argv, "exit_code": process.returncode,
-                        "stdout": process.stdout, "stderr": process.stderr})
+        try:
+            process = subprocess.run(
+                argv, cwd=ROOT, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", check=False,
+                timeout=COMMAND_TIMEOUT_SECONDS,
+            )
+            results.append({"argv": argv, "exit_code": process.returncode,
+                            "stdout": process.stdout, "stderr": process.stderr})
+        except subprocess.TimeoutExpired as exc:
+            # Do not report a timed-out or killed child as a successful experiment.
+            results.append({"argv": argv, "exit_code": None, "ok": False,
+                            "error": "timeout", "timeout_seconds": COMMAND_TIMEOUT_SECONDS,
+                            "stdout": _decoded(exc.stdout), "stderr": _decoded(exc.stderr)})
+        except OSError as exc:
+            results.append({"argv": argv, "exit_code": None, "ok": False,
+                            "error": type(exc).__name__, "detail": str(exc),
+                            "stdout": "", "stderr": ""})
     return {"lab": name, "sha256": {
         source.name: hashlib.sha256(source.read_bytes()).hexdigest(),
         test.name: hashlib.sha256(test.read_bytes()).hexdigest()},
@@ -49,6 +68,7 @@ def main():
                   "SQLite identity and SOURCE_ID are recorded by each pilot's stdout",
                   "Tests and probes run in separate processes and separate disposable fixtures",
                   "This runner does not prove cross-process concurrency or crash durability",
+                  "Each subprocess has a 120-second safety timeout; a timeout is failure, not evidence",
                   "Execution results are environment-specific; independent review is required",
               ]}
     print(json.dumps(report, indent=2, ensure_ascii=False))
