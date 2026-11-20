@@ -31,7 +31,7 @@ R2's independent `fixtures/e1_f1.sql` and `tools/e1.py` provide a disposable two
 
 ## Additional E1 laboratory pilots and tests
 
-Source and regression tests are present for the **L05 atomicity, L09 WAL visibility, L10 writer contention, and L11 stale-snapshot** pilots. Presence in the repository is not proof of successful execution or independent acceptance. L08/L12/L20/L22–L23/L25/L27 remain pending E1 pilot work; the runner below covers only L05/L09/L10/L11, not the complete E1 gate or the cumulative checkpoints.
+The runner covers **L05 atomicity, L09 WAL visibility, L10 WAL checkpoint progress, and L11 stale snapshots**, plus a separate writer-contention probe with the legacy filename `l10_writer_busy.py`. [Additional E1 integration probes](integration/README.md) cover process interruption, logical capacity, and selected backup/restore cases. The full E1 gate and cumulative checkpoints require further evidence.
 
 From the repository root, in a local environment suitable for the experiments:
 
