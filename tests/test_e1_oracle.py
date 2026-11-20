@@ -138,6 +138,33 @@ class E1OracleTests(unittest.TestCase):
         self.assertTrue(result["ok"], result["errors"])
         self.assertEqual(before, after)
 
+    def test_deleted_position_is_rejected_even_when_other_totals_unchanged(self):
+        self.sql("""
+            DELETE FROM stock_balance
+            WHERE item_id = 'item-bolt' AND location_id = 'loc-south';
+        """)
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_POSITION_SET", result["errors"])
+        self.assertIn("O1_BALANCE_MISMATCH:item-bolt:loc-south", result["errors"])
+
+    def test_journal_for_wrong_item_is_rejected(self):
+        self.sql("""
+            BEGIN;
+            INSERT INTO transfer VALUES
+                ('tx-cross-item', 'item-bolt', 'loc-north', 'loc-south', 3);
+            INSERT INTO journal_entry
+                (transfer_id, item_id, location_id, delta) VALUES
+                ('tx-cross-item', 'item-nut', 'loc-north', -3),
+                ('tx-cross-item', 'item-nut', 'loc-south', 3);
+            COMMIT;
+        """)
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_JOURNAL_PAIR:tx-cross-item", result["errors"])
+        self.assertTrue(any(error.startswith("O1_BALANCE_MISMATCH:")
+                            for error in result["errors"]))
+
     def test_balances_without_journal_fail_even_if_total_conserved(self):
         self.sql("""
             UPDATE stock_balance SET quantity = 9
