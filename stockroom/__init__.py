@@ -1,0 +1,1 @@
+"""Stockroom Ledger teaching application."""
