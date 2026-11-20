@@ -25,4 +25,8 @@ Exit code **0** means all five L01 oracles passed in that environment; any faile
 
 Use only the disposable fixtures created by the probe. Do not adapt fault-oriented exercises to live databases.
 
-**Status:** Only L01 has code here. L05/L08/L10–L12/L20/L22–L23/L25/L27 are planned E1 pilots, not yet executed or claimed complete. There is no release tag or approved distribution license for an edition at this stage.
+## Shared E1/F1 fixture and O1 oracle
+
+R2's independent `fixtures/e1_f1.sql` and `tools/e1.py` provide a disposable two-item/two-location stockroom fixture and a read-only postcondition checker. See [the F1/O1 interface](fixtures/E1_INTERFACE.md). To create a fresh database, run `python3 tools/e1.py create`; copy the JSON `database` path into `python3 tools/e1.py check "<absolute-database-path>"`. Tests for both the correct transfer and intentionally inconsistent states are in `tests/test_e1_oracle.py`. **These are pilot assets, not checkpoints or laboratory acceptance evidence.**
+
+**Status:** L01 and F1/O1 pilot support code are present. L05/L08/L10–L12/L20/L22–L23/L25/L27 remain planned E1 pilots, not yet executed or claimed complete. There is no release tag or approved distribution license for an edition at this stage.
