@@ -29,4 +29,18 @@ Use only the disposable fixtures created by the probe. Do not adapt fault-orient
 
 R2's independent `fixtures/e1_f1.sql` and `tools/e1.py` provide a disposable two-item/two-location stockroom fixture and a read-only postcondition checker. See [the F1/O1 interface](fixtures/E1_INTERFACE.md). To create a fresh database, run `python3 tools/e1.py create`; copy the JSON `database` path into `python3 tools/e1.py check "<absolute-database-path>"`. Tests for both the correct transfer and intentionally inconsistent states are in `tests/test_e1_oracle.py`. **These are pilot assets, not checkpoints or laboratory acceptance evidence.**
 
-**Status:** L01 and F1/O1 pilot support code are present. L05/L08/L10–L12/L20/L22–L23/L25/L27 remain planned E1 pilots, not yet executed or claimed complete. There is no release tag or approved distribution license for an edition at this stage.
+## Additional E1 laboratory pilots and tests
+
+Source and regression tests are present for the **L05 atomicity, L09 WAL visibility, L10 writer contention, and L11 stale-snapshot** pilots. Presence in the repository is not proof of successful execution or independent acceptance. L08/L12/L20/L22–L23/L25/L27 remain pending E1 pilot work; the runner below covers only L05/L09/L10/L11, not the complete E1 gate or the cumulative checkpoints.
+
+From the repository root, in a local environment suitable for the experiments:
+
+~~~sh
+python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s labs -p 'test_*.py' -v
+python3 labs/run_e1.py
+~~~
+
+The runner emits JSON with per-pilot evidence and exit status. Preserve raw output, stderr, return codes, OS/filesystem, Python and SQLite identities, and the source revision for review. Its supervisor tests include mocks and **do not** by themselves prove SQLite concurrency behavior. The standalone probes use disposable workspaces; do not point fault experiments at personal or production databases. CLI and Python SQLite engines must be identified independently. Run and review the missing E1 pilots and the complete acceptance matrix before promoting any checkpoint.
+
+**Status:** implementation/prototyping only; no E1 laboratory, checkpoint, platform matrix, release tag, or edition license is approved merely because these files exist.
