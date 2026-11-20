@@ -91,5 +91,45 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertEqual(result["commands"][1]["error"], "invalid probe JSON")
 
 
+    def test_zero_exit_without_sqlite_identity_is_rejected(self):
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        missing = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
+                               "sqlite_version": "test-version"}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[good, missing]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
+
+    def test_zero_exit_with_empty_oracles_is_rejected(self):
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        missing = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {},
+                               "sqlite_source_id": "test-id", "sqlite_version": "test-version"}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[good, missing]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
+
+    def test_zero_exit_with_non_boolean_oracle_is_rejected(self):
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        invalid = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {"valid": 1},
+                               "sqlite_source_id": "test-id", "sqlite_version": "test-version"}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[good, invalid]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
+
+
 if __name__ == "__main__":
     unittest.main()
