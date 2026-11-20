@@ -186,6 +186,9 @@ class E1OracleTests(unittest.TestCase):
         # externally damaged database. O1 must report both independent signals.
         connection = sqlite3.connect(self.path)
         try:
+            # The SQLite build may choose a different FK default. Set the
+            # bypass explicitly before any transaction, then verify it.
+            connection.execute("PRAGMA foreign_keys = OFF")
             self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 0)
             connection.execute(
                 """INSERT INTO journal_entry
