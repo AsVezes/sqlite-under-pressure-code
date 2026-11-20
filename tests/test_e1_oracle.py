@@ -231,6 +231,35 @@ class E1OracleTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("O1_NEGATIVE_QUANTITY", result["errors"])
 
+    def test_negative_transfer_bypassing_check_is_rejected_even_if_reconciled(self):
+        # A corrupted external writer can bypass CHECK; the journal and
+        # balances alone must not make a negative transfer valid.
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            self.assertEqual(
+                connection.execute("PRAGMA ignore_check_constraints").fetchone()[0], 1
+            )
+            connection.executescript("""
+                BEGIN;
+                INSERT INTO transfer VALUES
+                    ('tx-negative', 'item-bolt', 'loc-north', 'loc-south', -3);
+                UPDATE stock_balance SET quantity=13
+                    WHERE item_id='item-bolt' AND location_id='loc-north';
+                UPDATE stock_balance SET quantity= -1
+                    WHERE item_id='item-bolt' AND location_id='loc-south';
+                INSERT INTO journal_entry
+                    (transfer_id, item_id, location_id, delta) VALUES
+                    ('tx-negative', 'item-bolt', 'loc-north', 3),
+                    ('tx-negative', 'item-bolt', 'loc-south', -3);
+                COMMIT;
+            """)
+        finally:
+            connection.close()
+        result = e1.inspect(self.path)
+        self.assertFalse(result["ok"])
+        self.assertIn("O1_INVALID_TRANSFER:tx-negative", result["errors"])
+
     def test_balances_without_journal_fail_even_if_total_conserved(self):
         self.sql("""
             UPDATE stock_balance SET quantity = 9
