@@ -59,6 +59,16 @@ class F3PreflightTests(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["issues"][0]["code"], "F3_INVALID_CODE")
 
+    def test_future_schema_version_is_rejected_without_reading_locations(self):
+        self.update("PRAGMA user_version=999")
+        before = self.path.read_bytes()
+        result = f3.inspect(self.path)
+        self.assertEqual(result["user_version"], 999)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["issues"], [{"code": "F3_FUTURE_VERSION"}])
+        self.assertEqual(result["locations"], [])
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_missing_database_is_not_created(self):
         missing = Path(self.tmp.name) / "absent.sqlite"
         with self.assertRaises(FileNotFoundError):
