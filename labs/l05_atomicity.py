@@ -21,8 +21,8 @@ def connect(path):
 
 def state(conn):
     return {
-        "balances": conn.execute("SELECT id, qty FROM balances ORDER BY id").fetchall(),
-        "ledger": conn.execute("SELECT src, dst, qty FROM ledger ORDER BY id").fetchall(),
+        "balances": [list(r) for r in conn.execute("SELECT id, qty FROM balances ORDER BY id")],
+        "ledger": [list(r) for r in conn.execute("SELECT src, dst, qty FROM ledger ORDER BY id")],
     }
 
 
