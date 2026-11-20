@@ -133,6 +133,11 @@ def inspect(path: Path) -> dict:
         transfer_ids = set()
         for transfer_id, item, source, destination, quantity in transfers:
             transfer_ids.add(transfer_id)
+            # CHECK constraints can be bypassed by an external connection.
+            # A self-transfer or nonpositive amount must never pass O1 merely
+            # because its journal and projected balances reconcile.
+            if source == destination or quantity <= 0:
+                errors.append("O1_INVALID_TRANSFER:" + transfer_id)
             expected = sorted([
                 (item, source, -quantity),
                 (item, destination, quantity),
