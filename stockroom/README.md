@@ -40,3 +40,7 @@ The expected bolt balances are 7 and 5. Nuts stay at 4 and 8. O1 expects one tra
 Try a different ID with `--fail-after-debit` in the disposable workspace. The command should exit nonzero. Run `check` again and compare the balances and journal counts with the previous check. An excessive quantity, unknown position or identical source and destination also fails without moving stock. The savepoint regression verifies that the caller can keep earlier work in the same transaction after a single failed move. Closing or rolling back the outer transaction still controls durability.
 
 These development checkpoints require execution and independent review before acceptance.
+
+## CP03–CP11
+
+[Continue through backup and incident recovery](CHECKPOINTS.md#cp03cp11--continue-with-the-same-database) using the same Ledger.

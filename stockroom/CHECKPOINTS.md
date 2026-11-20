@@ -11,3 +11,55 @@ These immutable commits are the development inputs for CP00–CP02. The SQLite s
 Download or check out each output commit in a separate directory and follow its [command guide](README.md) from the repository root. Keep the database in a separate disposable directory and carry the same absolute path across all three states. At each stage run `python3 -m unittest discover -s stockroom -t . -v`. CP02 also provides the entry points needed to build all three states directly from a fresh workspace.
 
 These development snapshots require execution and independent review.
+
+## CP03–CP11 · Continue with the same database
+
+Start from the CP02 database, then extract each snapshot separately and keep its absolute database path. Run the command from that snapshot's repository root.
+
+| Step | Output snapshot | Chapter | Observable task |
+| --- | --- | --- | --- |
+| CP03 | [`124e8d0`](https://github.com/AsVezes/sqlite-under-pressure-code/tree/124e8d093b8c5d393a565c1422de42aae07c7949) | C08 | Set WAL or rollback journal |
+| CP04 | [`73c704f`](https://github.com/AsVezes/sqlite-under-pressure-code/tree/73c704f740739f845537b2959a7aa2c567f50122) | C11 | Observe passive checkpoint and failure phases |
+| CP05 | [`efdf110`](https://github.com/AsVezes/sqlite-under-pressure-code/tree/efdf110c61ad6f8485a5006590402e855089ca1c) | C13 | Install receipts and retry by the exact operation ID |
+| CP06 | [`f00d0c6`](https://github.com/AsVezes/sqlite-under-pressure-code/tree/f00d0c655abe9f10c3b6242332b68cab28797c9e) | C14 | Record deterministic report rows and raw timing samples |
+| CP07 | [`2a18aa9`](https://github.com/AsVezes/sqlite-under-pressure-code/tree/2a18aa9ed543cac9033b2f900e2f445a1027ce7a) | C17 | Compare indexing on paired copies, then install the teaching index |
+| CP08 | [`a7274aa`](https://github.com/AsVezes/sqlite-under-pressure-code/tree/a7274aaaa885258fd9dcdd2b05227414de9219b9) | C19 | Stage, resume, and atomically rebuild schema v2 |
+| CP09 | [`2957869`](https://github.com/AsVezes/sqlite-under-pressure-code/tree/295786957a72d2124384ccb46b1e423d4b7a5c55) | C23 | Publish a validated online backup |
+| CP10 | [`ee54941`](https://github.com/AsVezes/sqlite-under-pressure-code/tree/ee54941da1c9cc61a43e2b1b7a1fb6325713e280) | C24 | Verify restore and rehearse cutover and return |
+| CP11 | [`0645ed3`](https://github.com/AsVezes/sqlite-under-pressure-code/tree/0645ed34e32cc8e40d3b40e2998cbe0e5c77dc7d) | C28 | Replay and reconcile a combined incident |
+
+`DB` is the absolute database filename in a disposable Stockroom workspace. This route is intended for a POSIX shell with Python 3.12 or newer. Copy the existing database path before changing directories. Each snapshot can run `python3 -m unittest discover -s stockroom -t . -v`.
+
+~~~sh
+# CP03
+python3 -m stockroom.storage "$DB" --journal wal
+# CP04
+python3 -m stockroom.observe "$DB"
+# CP05
+python3 -m stockroom.writer "$DB" install
+python3 -m stockroom.writer "$DB" submit tx-001 item-bolt loc-north loc-south 3
+# CP06
+python3 -m stockroom.report "$DB" item-bolt --repeats 5
+# CP07
+python3 -m stockroom.tune "$DB" compare
+python3 -m stockroom.tune "$DB" install
+# CP08 (two existing locations in F1)
+python3 -m stockroom.migrate "$DB" --batch-size 1
+python3 -m stockroom.migrate "$DB" --batch-size 1
+python3 -m stockroom.migrate "$DB" --batch-size 1
+# CP09
+BACKUPS="${DB%/*}/backups"
+mkdir -p "$BACKUPS"
+python3 -m stockroom.backup "$DB" "$BACKUPS"
+# CP10 (set BUNDLE to the path returned in the CP09 JSON)
+python3 -m stockroom.writer "$DB" submit tx-after-cut item-bolt loc-north loc-south 1
+python3 -m stockroom.restore "$DB" "$BUNDLE" "$BACKUPS"
+# CP11
+python3 -m stockroom.drill "$DB"
+python3 -m stockroom check "$DB"
+~~~
+
+Use the CP03 WAL profile when timing the regular writer. CP05 retries contention within a wait budget, and replay of the same ID checks the full payload. The migration preserves the original location labels and requires the input rows to stay unchanged between staging calls. The recovery drill creates an exclusive temporary copy of the project ledger, and its selection file belongs to the rehearsal. Run it with other writers paused if comparing a known receipt boundary.
+
+The commands and tests were executed on Linux with Python 3.12.3 and SQLite 3.45.1 from the Python standard library. Platform variants, the official standalone shell, and independent acceptance have their own checks.
+
