@@ -46,6 +46,37 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["commands"][0]["error"], "missing positive unittest success evidence")
 
+    def test_all_discovered_tests_skipped_is_not_success(self):
+        skipped = subprocess.CompletedProcess(
+            ["python"], 0, stdout="",
+            stderr="----------------------------------------------------------------------\\nRan 2 tests in 0.001s\\n\\nOK (skipped=2)\\n",
+        )
+        probe = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
+                               "sqlite_source_id": "test-id", "sqlite_version": "test-version"}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[skipped, probe]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][0]["error"], "missing positive unittest success evidence")
+
+    def test_some_skipped_tests_with_executed_successes_are_accepted(self):
+        partial = subprocess.CompletedProcess(
+            ["python"], 0, stdout="",
+            stderr="----------------------------------------------------------------------\\nRan 2 tests in 0.001s\\n\\nOK (skipped=1)\\n",
+        )
+        probe = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
+                               "sqlite_source_id": "test-id", "sqlite_version": "test-version"}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[partial, probe]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertTrue(result["ok"])
+
     def test_missing_unittest_summary_is_not_success(self):
         empty = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
         probe = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr="")
