@@ -143,7 +143,9 @@ def rehearse(live, bundle, parent):
     finally:
         try:
             select(pointer, live)
-        except OSError as return_failure:
+            if selected(pointer) != live:
+                raise RuntimeError("return selection does not point to the source")
+        except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as return_failure:
             previous = f"rehearsal failed ({failure}); " if failure is not None else ""
             raise RuntimeError(
                 f"{previous}return to source failed ({return_failure}); "
