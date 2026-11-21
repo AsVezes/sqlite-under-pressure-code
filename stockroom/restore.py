@@ -55,9 +55,16 @@ def require_history_prefix(live, restored, cut):
         """
         if source.execute(opening).fetchall() != candidate.execute(opening).fetchall():
             raise ValueError("backup opening balances differ from the source")
-        if any(a != b for a, b in zip(source.execute(history, (cut,)),
-                                      candidate.execute(history, (cut,)), strict=True)):
-            raise ValueError("backup receipt history diverges from the source")
+        from itertools import zip_longest
+        missing = object()
+        for source_row, candidate_row in zip_longest(
+            source.execute(history, (cut,)), candidate.execute(history, (cut,)),
+            fillvalue=missing,
+        ):
+            if source_row is missing or candidate_row is missing:
+                raise ValueError("backup receipt history length differs from the source")
+            if source_row != candidate_row:
+                raise ValueError("backup receipt history diverges from the source")
 
 
 def smoke_request(db):
