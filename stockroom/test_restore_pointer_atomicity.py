@@ -39,3 +39,27 @@ class SelectionAtomicityTests(unittest.TestCase):
                     select(pointer, root / "candidate.db")
             self.assertFalse(pointer.exists())
             self.assertFalse(pointer.with_suffix(".next").exists())
+
+    def test_partial_staging_write_failure_preserves_original(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            pointer = root / "selection.json"
+            original = root / "live.db"
+            select(pointer, original)
+            before = pointer.read_bytes()
+            staged = pointer.with_suffix(".next")
+            actual_write = Path.write_text
+
+            def fail_after_partial_write(path, data, **kwargs):
+                if path == staged:
+                    actual_write(path, data[:5], **kwargs)
+                    raise OSError("injected partial staging write")
+                return actual_write(path, data, **kwargs)
+
+            with patch.object(Path, "write_text", autospec=True, side_effect=fail_after_partial_write):
+                with self.assertRaisesRegex(OSError, "injected partial staging write"):
+                    select(pointer, root / "candidate.db")
+
+            self.assertEqual(pointer.read_bytes(), before)
+            self.assertEqual(selected(pointer), original)
+            self.assertFalse(staged.exists())
