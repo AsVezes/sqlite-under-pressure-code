@@ -36,7 +36,8 @@ def initial(conn):
 
 def debit(conn):
     cursor = conn.execute("UPDATE balances SET qty=qty-3 WHERE id=1 AND qty>=3")
-    assert cursor.rowcount == 1
+    if cursor.rowcount != 1:
+        raise RuntimeError(f"debit affected {cursor.rowcount} rows; expected exactly one")
 
 
 def finish(conn):
@@ -74,7 +75,8 @@ def run_case(root, name, scenario):
             changed = conn.execute(
                 "UPDATE balances SET qty=qty-11 WHERE id=1 AND qty>=11"
             ).rowcount
-            assert changed == 0
+            if changed != 0:
+                raise RuntimeError(f"insufficient-balance update affected {changed} rows")
             conn.execute("ROLLBACK")
         else:
             raise ValueError(scenario)
