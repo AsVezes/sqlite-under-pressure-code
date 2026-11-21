@@ -130,7 +130,8 @@ def rehearse(live, bundle, parent):
         if selected(pointer) != restored:
             raise ValueError("selection did not point to the verified restore")
         elapsed = monotonic_ns() - begin
-        if validate(live)["ledger"] != original["ledger"]:
+        current = validate(live)
+        if (current["ledger"], current["watermark"]) != (original["ledger"], original["watermark"]):
             raise ValueError("source changed during the rehearsal")
     finally:
         select(pointer, live)
