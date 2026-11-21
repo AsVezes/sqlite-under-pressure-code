@@ -62,6 +62,9 @@ def run_one(name):
                 except (ValueError, TypeError, AttributeError):
                     record["error"] = "invalid probe JSON"
                     record["ok"] = False
+            if argv == commands[0] and process.returncode == 0 and "Ran 0 tests" in process.stderr:
+                record["error"] = "zero tests discovered"
+                record["ok"] = False
             results.append(record)
         except subprocess.TimeoutExpired as exc:
             # Do not report a timed-out or killed child as a successful experiment.
