@@ -56,8 +56,10 @@ def run_one(name):
                             or not isinstance(oracles, dict)
                             or not oracles
                             or not all(value is True for value in oracles.values())
-                            or not identity.get("sqlite_source_id")
-                            or not identity.get("sqlite_version")):
+                            or not isinstance(identity.get("sqlite_source_id"), str)
+                            or not identity["sqlite_source_id"].strip()
+                            or not isinstance(identity.get("sqlite_version"), str)
+                            or not identity["sqlite_version"].strip()):
                         record["error"] = "invalid probe evidence"
                         record["ok"] = False
                 except (ValueError, TypeError, AttributeError):
