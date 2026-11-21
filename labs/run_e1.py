@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 
@@ -62,9 +63,12 @@ def run_one(name):
                 except (ValueError, TypeError, AttributeError):
                     record["error"] = "invalid probe JSON"
                     record["ok"] = False
-            if argv == commands[0] and process.returncode == 0 and "Ran 0 tests" in process.stderr:
-                record["error"] = "zero tests discovered"
-                record["ok"] = False
+            if argv == commands[0] and process.returncode == 0:
+                # A zero exit without a positive unittest summary is not proof of discovery.
+                summary = re.search(r"(?m)^Ran ([0-9]+) tests? in ", process.stderr)
+                if summary is None or int(summary.group(1)) == 0:
+                    record["error"] = "no positive unittest discovery summary"
+                    record["ok"] = False
             results.append(record)
         except subprocess.TimeoutExpired as exc:
             # Do not report a timed-out or killed child as a successful experiment.
