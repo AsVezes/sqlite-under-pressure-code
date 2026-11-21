@@ -125,8 +125,8 @@ def rehearse(live, bundle, parent):
         raise
     pointer = restored.parent / "selection.json"
     select(pointer, live)
-    select(pointer, restored)
     try:
+        select(pointer, restored)
         if selected(pointer) != restored:
             raise ValueError("selection did not point to the verified restore")
         elapsed = monotonic_ns() - begin
