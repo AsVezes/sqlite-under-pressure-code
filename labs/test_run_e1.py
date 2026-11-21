@@ -65,7 +65,7 @@ class RunnerSupervisionTests(unittest.TestCase):
     def test_some_skipped_tests_with_executed_successes_are_accepted(self):
         partial = subprocess.CompletedProcess(
             ["python"], 0, stdout="",
-            stderr="----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nOK (skipped=1)\\n",
+            stderr="----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nOK (skipped=1)\n",
         )
         probe = subprocess.CompletedProcess(
             ["python"], 0,
