@@ -35,8 +35,11 @@ def restore(bundle, parent):
 
 def select(pointer, database):
     staged = pointer.with_suffix(".next")
-    staged.write_text(json.dumps({"database": str(database)}) + "\n", encoding="utf-8")
-    staged.replace(pointer)
+    try:
+        staged.write_text(json.dumps({"database": str(database)}) + "\n", encoding="utf-8")
+        staged.replace(pointer)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def selected(pointer):
