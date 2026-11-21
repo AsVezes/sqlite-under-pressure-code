@@ -124,8 +124,8 @@ def rehearse(live, bundle, parent):
         shutil.rmtree(restored.parent)
         raise
     pointer = restored.parent / "selection.json"
-    select(pointer, live)
     try:
+        select(pointer, live)
         select(pointer, restored)
         if selected(pointer) != restored:
             raise ValueError("selection did not point to the verified restore")
