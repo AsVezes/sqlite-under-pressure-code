@@ -44,7 +44,7 @@ class RunnerSupervisionTests(unittest.TestCase):
         with patch.object(run_e1.subprocess, "run", side_effect=[empty, probe]):
             result = run_e1.run_one("l05_atomicity")
         self.assertFalse(result["ok"])
-        self.assertEqual(result["commands"][0]["error"], "no positive unittest discovery summary")
+        self.assertEqual(result["commands"][0]["error"], "missing positive unittest success evidence")
 
     def test_missing_unittest_summary_is_not_success(self):
         empty = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
@@ -52,7 +52,23 @@ class RunnerSupervisionTests(unittest.TestCase):
         with patch.object(run_e1.subprocess, "run", side_effect=[empty, probe]):
             result = run_e1.run_one("l05_atomicity")
         self.assertFalse(result["ok"])
-        self.assertEqual(result["commands"][0]["error"], "no positive unittest discovery summary")
+        self.assertEqual(result["commands"][0]["error"], "missing positive unittest success evidence")
+
+    def test_zero_exit_with_failed_unittest_summary_is_rejected(self):
+        failed = subprocess.CompletedProcess(
+            ["python"], 0, stdout="",
+            stderr="Ran 1 test in 0.001s\n\nFAILED (failures=1)\n",
+        )
+        probe = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
+                               "sqlite_source_id": "test-id", "sqlite_version": "test-version"}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[failed, probe]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][0]["error"], "missing positive unittest success evidence")
 
     def test_nonzero_child_is_not_success(self):
         outcomes = [
