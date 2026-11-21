@@ -173,5 +173,32 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
 
 
+    def test_zero_exit_with_numeric_sqlite_identity_is_rejected(self):
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK)
+        invalid = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
+                               "sqlite_source_id": 123, "sqlite_version": 3460100}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[good, invalid]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
+
+    def test_zero_exit_with_whitespace_sqlite_identity_is_rejected(self):
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK)
+        invalid = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
+                               "sqlite_source_id": "  ", "sqlite_version": "3.46.1"}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[good, invalid]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
+
+
 if __name__ == "__main__":
     unittest.main()
