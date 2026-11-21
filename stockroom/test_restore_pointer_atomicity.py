@@ -84,3 +84,31 @@ class SelectionAtomicityTests(unittest.TestCase):
             self.assertEqual(len(set(paths)), 2)
             self.assertEqual(selected(pointer), first)
             self.assertEqual(list(root.glob(".selection-*")), [])
+
+    def test_failed_outer_replace_does_not_remove_nested_selection(self):
+        """A failing overlapping writer must not delete another writer's staging."""
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            pointer = root / "selection.json"
+            original, outer, nested = (root / name for name in ("live.db", "outer.db", "nested.db"))
+            select(pointer, original)
+            before = pointer.read_bytes()
+            actual_replace = Path.replace
+            staged_paths = []
+
+            def nested_then_fail(path, target):
+                staged_paths.append(path)
+                if len(staged_paths) == 1:
+                    select(pointer, nested)
+                    raise OSError("injected outer replace failure")
+                return actual_replace(path, target)
+
+            with patch.object(Path, "replace", autospec=True, side_effect=nested_then_fail):
+                with self.assertRaisesRegex(OSError, "injected outer replace failure"):
+                    select(pointer, outer)
+
+            self.assertEqual(len(staged_paths), 2)
+            self.assertNotEqual(staged_paths[0].parent, staged_paths[1].parent)
+            self.assertEqual(selected(pointer), nested)
+            self.assertNotEqual(pointer.read_bytes(), before)
+            self.assertEqual(list(root.glob(".selection-*")), [])
