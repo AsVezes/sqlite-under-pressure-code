@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from .backup import capture, verify_bundle
+from .backup import capture, validate, verify_bundle
 from .restore import rehearse
 from .test_backup import ready
 from .transfer import Transfer
@@ -16,6 +16,7 @@ class RestoreFutureBoundaryTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             root = Path(temp)
             live = ready(root)
+            baseline = validate(live)
             future = root / "future.db"
             copy_database(live, future)
             submit(future, Transfer("future-only", "item-bolt",
@@ -27,3 +28,5 @@ class RestoreFutureBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ahead of the source"):
                 rehearse(live, bundle, root)
             self.assertEqual(list(root.glob("stockroom-restore-*")), [])
+            self.assertEqual(validate(live), baseline)
+            self.assertEqual(list(root.rglob("selection.json")), [])
