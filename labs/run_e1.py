@@ -68,7 +68,12 @@ def run_one(name):
             if argv == commands[0] and process.returncode == 0:
                 # A zero exit without a positive unittest summary is not proof of discovery.
                 summary = re.search(r"(?m)^Ran ([0-9]+) tests? in ", process.stderr)
-                if (summary is None or int(summary.group(1)) == 0 or not re.search(r"(?m)^OK(?: \([^\n]*\))?\s*$", process.stderr) or re.search(r"(?m)^FAILED\b", process.stderr)):
+                ok_summary = re.search(r"(?m)^OK(?: \(([^\n]*)\))?\s*$", process.stderr)
+                skipped = re.search(r"(?:^|, )skipped=([0-9]+)(?:,|$)", ok_summary.group(1) or "") if ok_summary else None
+                if (summary is None or int(summary.group(1)) == 0
+                        or ok_summary is None
+                        or (skipped is not None and int(skipped.group(1)) >= int(summary.group(1)))
+                        or re.search(r"(?m)^FAILED\b", process.stderr)):
                     record["error"] = "missing positive unittest success evidence"
                     record["ok"] = False
             results.append(record)
