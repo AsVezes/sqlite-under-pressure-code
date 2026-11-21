@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import run_e1
 
-UNITTEST_OK = "----------------------------------------------------------------------\\nRan 1 test in 0.001s\\n\\nOK\\n"
+UNITTEST_OK = "----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n"
 
 
 class RunnerSupervisionTests(unittest.TestCase):
