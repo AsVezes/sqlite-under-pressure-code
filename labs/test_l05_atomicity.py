@@ -48,6 +48,28 @@ class L05AtomicityTests(unittest.TestCase):
         self.assertNotEqual(after, before)
         self.assertEqual(observed["integrity_check"], "ok")
 
+    def test_debit_guard_fails_closed_when_row_missing(self):
+        conn = lab.connect(":memory:")
+        self.addCleanup(conn.close)
+        lab.initial(conn)
+        conn.execute("DELETE FROM balances WHERE id=1")
+        with self.assertRaisesRegex(RuntimeError, "debit affected 0 rows"):
+            lab.debit(conn)
+
+    def test_optimized_python_preserves_guards_and_oracles(self):
+        import json
+        import subprocess
+        import sys
+        result = subprocess.run(
+            [sys.executable, "-O", str(Path(lab.__file__).resolve())],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["status"], "pass")
+        self.assertTrue(all(value is True for value in report["oracles"].values()))
+        self.assertTrue(report["environment"]["sqlite_source_id"])
+
     def test_no_database_path_argument_in_main(self):
         # The lab entry point accepts no database path and creates its own root.
         # Verify the externally visible entry point without changing CWD.
