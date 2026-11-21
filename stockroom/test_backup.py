@@ -1,9 +1,10 @@
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 
-from .backup import capture, latest, verify_bundle
+from .backup import capture, digest, latest, verify_bundle
 from .environment import connect, initialize_workspace
 from .ledger import initialize_ledger
 from .migrate import step
@@ -58,3 +59,26 @@ class BackupTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "receipt trigger"):
                 capture(path, root)
             self.assertEqual(list(root.glob("stockroom-backup-*")), [])
+
+
+    def test_verify_rejects_sidecars_and_wal_mode_without_sidecars(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = ready(root)
+            bundle = Path(capture(path, root)["bundle"])
+            snapshot = bundle / "ledger.db"
+            for suffix in ("-journal", "-wal", "-shm"):
+                with self.subTest(suffix=suffix):
+                    sidecar = snapshot.with_name(snapshot.name + suffix)
+                    sidecar.touch()
+                    with self.assertRaisesRegex(ValueError, "unexpected SQLite sidecar"):
+                        verify_bundle(bundle)
+                    sidecar.unlink()
+            with closing(connect(snapshot)) as db:
+                self.assertEqual(db.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
+            manifest = bundle / "manifest.json"
+            metadata = json.loads(manifest.read_text())
+            metadata["sha256"] = digest(snapshot)
+            manifest.write_text(json.dumps(metadata))
+            with self.assertRaisesRegex(ValueError, "must use DELETE journal mode"):
+                verify_bundle(bundle)

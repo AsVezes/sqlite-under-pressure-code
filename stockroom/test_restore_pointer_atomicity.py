@@ -19,7 +19,7 @@ class SelectionAtomicityTests(unittest.TestCase):
             actual_replace = Path.replace
 
             def reject_pointer_replace(path, target):
-                if path == pointer.with_suffix(".next"):
+                if path.name == "selection.next":
                     raise OSError("injected replace failure")
                 return actual_replace(path, target)
 
@@ -28,7 +28,7 @@ class SelectionAtomicityTests(unittest.TestCase):
                     select(pointer, candidate)
 
             self.assertEqual(selected(pointer), original)
-            self.assertFalse(pointer.with_suffix(".next").exists())
+            self.assertEqual(list(root.glob(".selection-*")), [])
 
     def test_first_replace_failure_does_not_create_pointer(self):
         with TemporaryDirectory() as temp:
@@ -38,7 +38,7 @@ class SelectionAtomicityTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "injected replace failure"):
                     select(pointer, root / "candidate.db")
             self.assertFalse(pointer.exists())
-            self.assertFalse(pointer.with_suffix(".next").exists())
+            self.assertEqual(list(root.glob(".selection-*")), [])
 
     def test_partial_staging_write_failure_preserves_original(self):
         with TemporaryDirectory() as temp:
@@ -47,11 +47,10 @@ class SelectionAtomicityTests(unittest.TestCase):
             original = root / "live.db"
             select(pointer, original)
             before = pointer.read_bytes()
-            staged = pointer.with_suffix(".next")
             actual_write = Path.write_text
 
             def fail_after_partial_write(path, data, **kwargs):
-                if path == staged:
+                if path.name == "selection.next":
                     actual_write(path, data[:5], **kwargs)
                     raise OSError("injected partial staging write")
                 return actual_write(path, data, **kwargs)
@@ -62,4 +61,26 @@ class SelectionAtomicityTests(unittest.TestCase):
 
             self.assertEqual(pointer.read_bytes(), before)
             self.assertEqual(selected(pointer), original)
-            self.assertFalse(staged.exists())
+            self.assertEqual(list(root.glob(".selection-*")), [])
+
+
+    def test_overlapping_replacements_use_distinct_staging_paths(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            pointer = root / "selection.json"
+            first, second = root / "first.db", root / "second.db"
+            actual_replace = Path.replace
+            paths = []
+
+            def overlap(path, target):
+                paths.append(path)
+                if len(paths) == 1:
+                    select(pointer, second)
+                    self.assertEqual(selected(pointer), second)
+                return actual_replace(path, target)
+
+            with patch.object(Path, "replace", autospec=True, side_effect=overlap):
+                select(pointer, first)
+            self.assertEqual(len(set(paths)), 2)
+            self.assertEqual(selected(pointer), first)
+            self.assertEqual(list(root.glob(".selection-*")), [])

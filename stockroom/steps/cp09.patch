@@ -1,9 +1,9 @@
 diff --git a/stockroom/backup.py b/stockroom/backup.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..e18e3df87996f2bb7699241aaf33c06f3d39691b
+index 0000000000000000000000000000000000000000..a63b7cd9d07b36ab63a9c5eac2d4aaf465cf92e8
 --- /dev/null
 +++ b/stockroom/backup.py
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,121 @@
 +"""CP09: capture and validate an online snapshot before making it selectable."""
 +from contextlib import closing
 +import hashlib
@@ -27,9 +27,11 @@ index 0000000000000000000000000000000000000000..e18e3df87996f2bb7699241aaf33c06f
 +        return hashlib.file_digest(handle, "sha256").hexdigest()
 +
 +
-+def validate(path):
++def validate(path, *, standalone=False):
 +    with closing(connect(path, read_only=True)) as db:
 +        db.execute("BEGIN")
++        if standalone and db.execute("PRAGMA journal_mode").fetchone() != ("delete",):
++            raise ValueError("bundle database must use DELETE journal mode")
 +        state = require_ledger(db)
 +        if state["schema_version"] != 2:
 +            raise ValueError("backup or restore requires schema v2")
@@ -86,12 +88,16 @@ index 0000000000000000000000000000000000000000..e18e3df87996f2bb7699241aaf33c06f
 +    file, metadata = bundle / "ledger.db", bundle / "manifest.json"
 +    if any(p.is_symlink() or not p.is_file() for p in (file, metadata)):
 +        raise ValueError("backup files must be regular files")
++    for suffix in ("-journal", "-wal", "-shm"):
++        sidecar = file.with_name(file.name + suffix)
++        if sidecar.exists() or sidecar.is_symlink():
++            raise ValueError(f"unexpected SQLite sidecar in bundle: {sidecar.name}")
 +    manifest = json.loads(metadata.read_text(encoding="utf-8"))
 +    if not isinstance(manifest, dict) or type(manifest.get("captured_at_ns")) is not int:
 +        raise ValueError("invalid manifest")
 +    if digest(file) != manifest.get("sha256"):
 +        raise ValueError("backup digest mismatch")
-+    state = validate(file)
++    state = validate(file, standalone=True)
 +    for key in ("schema_version", "workspace_id", "watermark"):
 +        if state[key] != manifest.get(key):
 +            raise ValueError(f"backup metadata mismatch: {key}")
@@ -121,16 +127,17 @@ index 0000000000000000000000000000000000000000..e18e3df87996f2bb7699241aaf33c06f
 +    raise SystemExit(main())
 diff --git a/stockroom/test_backup.py b/stockroom/test_backup.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..cc900ce4c54d134598e7e1b3667d9708ec9dfde9
+index 0000000000000000000000000000000000000000..f98de95de1b917428eaf41667cf4375bb0080c5c
 --- /dev/null
 +++ b/stockroom/test_backup.py
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,84 @@
 +from contextlib import closing
 +from pathlib import Path
 +from tempfile import TemporaryDirectory
++import json
 +import unittest
 +
-+from .backup import capture, latest, verify_bundle
++from .backup import capture, digest, latest, verify_bundle
 +from .environment import connect, initialize_workspace
 +from .ledger import initialize_ledger
 +from .migrate import step
@@ -185,6 +192,29 @@ index 0000000000000000000000000000000000000000..cc900ce4c54d134598e7e1b3667d9708
 +            with self.assertRaisesRegex(ValueError, "receipt trigger"):
 +                capture(path, root)
 +            self.assertEqual(list(root.glob("stockroom-backup-*")), [])
++
++
++    def test_verify_rejects_sidecars_and_wal_mode_without_sidecars(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            path = ready(root)
++            bundle = Path(capture(path, root)["bundle"])
++            snapshot = bundle / "ledger.db"
++            for suffix in ("-journal", "-wal", "-shm"):
++                with self.subTest(suffix=suffix):
++                    sidecar = snapshot.with_name(snapshot.name + suffix)
++                    sidecar.touch()
++                    with self.assertRaisesRegex(ValueError, "unexpected SQLite sidecar"):
++                        verify_bundle(bundle)
++                    sidecar.unlink()
++            with closing(connect(snapshot)) as db:
++                self.assertEqual(db.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
++            manifest = bundle / "manifest.json"
++            metadata = json.loads(manifest.read_text())
++            metadata["sha256"] = digest(snapshot)
++            manifest.write_text(json.dumps(metadata))
++            with self.assertRaisesRegex(ValueError, "must use DELETE journal mode"):
++                verify_bundle(bundle)
 diff --git a/stockroom/writer.py b/stockroom/writer.py
 index 670314106d80d102fee6f46578f590b601bfeb8d..401e40d634d82adc6f17b4653173f766455b78b6 100644
 --- a/stockroom/writer.py

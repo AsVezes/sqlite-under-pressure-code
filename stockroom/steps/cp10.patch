@@ -1,15 +1,16 @@
 diff --git a/stockroom/restore.py b/stockroom/restore.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..1749097989167945aaefa37873f7f494158afad2
+index 0000000000000000000000000000000000000000..c6ca2775eadb8d480b4dc0163fd31530f5ed19f5
 --- /dev/null
 +++ b/stockroom/restore.py
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,167 @@
 +"""CP10: admit a verified restore in isolation and rehearse cutover and return."""
 +from contextlib import closing
++from itertools import zip_longest
 +import json
 +from pathlib import Path
 +import shutil
-+from tempfile import mkdtemp
++from tempfile import TemporaryDirectory, mkdtemp
 +from time import monotonic_ns
 +from uuid import uuid4
 +
@@ -40,9 +41,11 @@ index 0000000000000000000000000000000000000000..1749097989167945aaefa37873f7f494
 +
 +
 +def select(pointer, database):
-+    staged = pointer.with_suffix(".next")
-+    staged.write_text(json.dumps({"database": str(database)}) + "\n", encoding="utf-8")
-+    staged.replace(pointer)
++    # Separate staging paths prevent overlapping replacements from sharing a file.
++    with TemporaryDirectory(dir=pointer.parent, prefix=".selection-") as directory:
++        staged = Path(directory) / "selection.next"
++        staged.write_text(json.dumps({"database": str(database)}) + "\n", encoding="utf-8")
++        staged.replace(pointer)
 +
 +
 +def selected(pointer):
@@ -61,9 +64,15 @@ index 0000000000000000000000000000000000000000..1749097989167945aaefa37873f7f494
 +        """
 +        if source.execute(opening).fetchall() != candidate.execute(opening).fetchall():
 +            raise ValueError("backup opening balances differ from the source")
-+        if any(a != b for a, b in zip(source.execute(history, (cut,)),
-+                                      candidate.execute(history, (cut,)), strict=True)):
-+            raise ValueError("backup receipt history diverges from the source")
++        missing = object()
++        for source_row, candidate_row in zip_longest(
++            source.execute(history, (cut,)), candidate.execute(history, (cut,)),
++            fillvalue=missing,
++        ):
++            if source_row is missing or candidate_row is missing:
++                raise ValueError("backup receipt history length differs from the source")
++            if source_row != candidate_row:
++                raise ValueError("backup receipt history diverges from the source")
 +
 +
 +def smoke_request(db):
@@ -101,7 +110,8 @@ index 0000000000000000000000000000000000000000..1749097989167945aaefa37873f7f494
 +            if not inspect_connection(db)["ok"]:
 +                raise ValueError("write smoke failed ledger reconciliation")
 +        finally:
-+            db.execute("ROLLBACK")
++            if db.in_transaction:
++                db.execute("ROLLBACK")
 +    after = validate(path)
 +    if (after["ledger"], after["watermark"]) != (expected["ledger"], expected["watermark"]):
 +        raise ValueError("write smoke changed ledger")
@@ -123,16 +133,28 @@ index 0000000000000000000000000000000000000000..1749097989167945aaefa37873f7f494
 +        shutil.rmtree(restored.parent)
 +        raise
 +    pointer = restored.parent / "selection.json"
-+    select(pointer, live)
-+    select(pointer, restored)
++    failure = None
 +    try:
++        select(pointer, live)
++        select(pointer, restored)
 +        if selected(pointer) != restored:
 +            raise ValueError("selection did not point to the verified restore")
 +        elapsed = monotonic_ns() - begin
-+        if validate(live)["ledger"] != original["ledger"]:
++        current = validate(live)
++        if (current["ledger"], current["watermark"]) != (original["ledger"], original["watermark"]):
 +            raise ValueError("source changed during the rehearsal")
++    except BaseException as error:
++        failure = error
++        raise
 +    finally:
-+        select(pointer, live)
++        try:
++            select(pointer, live)
++        except OSError as return_failure:
++            previous = f"rehearsal failed ({failure}); " if failure is not None else ""
++            raise RuntimeError(
++                f"{previous}return to source failed ({return_failure}); "
++                f"verify selection at {pointer} before admitting writes"
++            ) from return_failure
 +    return {"restored": str(restored), "selection": str(pointer),
 +            "returned_to": str(selected(pointer)), "source_watermark": original["watermark"],
 +            "restored_watermark": candidate["watermark"], "rpo_operations": gap,
@@ -209,3 +231,505 @@ index 0000000000000000000000000000000000000000..a68507a3ccbbed85e4a8bab14eeefd93
 +                    with self.assertRaisesRegex(ValueError, "history diverges"):
 +                        rehearse(live, bundle, root)
 +                    self.assertEqual(list(root.glob("stockroom-restore-*")), [])
+diff --git a/stockroom/test_restore_copy_integrity.py b/stockroom/test_restore_copy_integrity.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f3d53e27b505490b4829632314c77d3b61decf7
+--- /dev/null
++++ b/stockroom/test_restore_copy_integrity.py
+@@ -0,0 +1,35 @@
++"""CP10: a corrupted copied database must be rejected before selection."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++from unittest.mock import patch
++
++from .backup import capture, validate
++from .restore import rehearse
++from .test_backup import ready
++
++
++class RestoreCopyIntegrityTests(unittest.TestCase):
++    def test_modified_copy_fails_digest_and_removes_staging(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            before = validate(live)
++            bundle = Path(capture(live, root)["bundle"])
++            from . import restore as restore_module
++            real_copy = restore_module.shutil.copyfile
++
++            def corrupt_copy(source, destination):
++                result = real_copy(source, destination)
++                with Path(destination).open("ab") as stream:
++                    stream.write(b"corrupted-copy")
++                return result
++
++            with patch("stockroom.restore.shutil.copyfile", side_effect=corrupt_copy) as copied:
++                with self.assertRaisesRegex(ValueError, "restored bytes differ"):
++                    rehearse(live, bundle, root)
++
++            copied.assert_called_once()
++            self.assertEqual(list(root.glob("stockroom-restore-*")), [])
++            self.assertEqual(list(root.rglob("selection.json")), [])
++            self.assertEqual(validate(live), before)
+diff --git a/stockroom/test_restore_divergent_prefix.py b/stockroom/test_restore_divergent_prefix.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e37489ce50cb6dcdc514d0424139e24309bb9f8
+--- /dev/null
++++ b/stockroom/test_restore_divergent_prefix.py
+@@ -0,0 +1,34 @@
++"""CP10 negative control: equal receipt boundaries do not prove common history."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++
++from .backup import capture, validate, verify_bundle
++from .restore import rehearse
++from .test_backup import ready
++from .transfer import Transfer
++from .tune import copy_database
++from .writer import submit
++
++
++class RestoreDivergentPrefixTests(unittest.TestCase):
++    def test_equal_watermarks_with_different_receipts_are_refused(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            candidate = root / "candidate.db"
++            copy_database(live, candidate)
++            submit(live, Transfer("live-only", "item-bolt",
++                                  "loc-north", "loc-south", 1))
++            submit(candidate, Transfer("candidate-only", "item-bolt",
++                                       "loc-north", "loc-south", 1))
++            original = validate(live)
++            bundle = Path(capture(candidate, root)["bundle"])
++            verified, _manifest = verify_bundle(bundle)
++            self.assertTrue(verified["ledger"]["ok"])
++            self.assertEqual(verified["watermark"], original["watermark"])
++            with self.assertRaisesRegex(ValueError, "receipt history diverges"):
++                rehearse(live, bundle, root)
++            self.assertEqual(validate(live), original)
++            self.assertEqual(list(root.glob("stockroom-restore-*")), [])
++            self.assertEqual(list(root.rglob("selection.json")), [])
+diff --git a/stockroom/test_restore_future_boundary.py b/stockroom/test_restore_future_boundary.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6fcbcd740b572ac0868eabf08cc0ebd7d43ed69
+--- /dev/null
++++ b/stockroom/test_restore_future_boundary.py
+@@ -0,0 +1,32 @@
++"""CP10 negative control: a backup ahead of the live receipt boundary is refused."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++
++from .backup import capture, validate, verify_bundle
++from .restore import rehearse
++from .test_backup import ready
++from .transfer import Transfer
++from .tune import copy_database
++from .writer import submit
++
++
++class RestoreFutureBoundaryTests(unittest.TestCase):
++    def test_future_receipt_boundary_refused_without_selection(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            baseline = validate(live)
++            future = root / "future.db"
++            copy_database(live, future)
++            submit(future, Transfer("future-only", "item-bolt",
++                                    "loc-north", "loc-south", 1))
++            bundle = Path(capture(future, root)["bundle"])
++            verified, _manifest = verify_bundle(bundle)
++            self.assertTrue(verified["ledger"]["ok"])
++            self.assertEqual(verified["watermark"], 1)
++            with self.assertRaisesRegex(ValueError, "ahead of the source"):
++                rehearse(live, bundle, root)
++            self.assertEqual(list(root.glob("stockroom-restore-*")), [])
++            self.assertEqual(validate(live), baseline)
++            self.assertEqual(list(root.rglob("selection.json")), [])
+diff --git a/stockroom/test_restore_initial_selection_failure.py b/stockroom/test_restore_initial_selection_failure.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..291f0153c510a587d947672c3a43847220fd2a11
+--- /dev/null
++++ b/stockroom/test_restore_initial_selection_failure.py
+@@ -0,0 +1,37 @@
++"""CP10: an exception after the initial pointer write must restore the source."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++from unittest.mock import patch
++
++from .backup import capture, validate
++from .restore import rehearse, selected
++from .test_backup import ready
++
++
++class RestoreInitialSelectionFailureTests(unittest.TestCase):
++    def test_initial_selection_error_after_write_returns_to_source(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            before = validate(live)
++            bundle = Path(capture(live, root)["bundle"])
++            from . import restore as restore_module
++            actual_select = restore_module.select
++            calls = []
++
++            def fail_after_first_write(pointer, database):
++                actual_select(pointer, database)
++                calls.append(Path(database))
++                if len(calls) == 1:
++                    raise OSError("injected initial selection failure")
++
++            with patch("stockroom.restore.select", side_effect=fail_after_first_write):
++                with self.assertRaisesRegex(OSError, "injected initial selection failure"):
++                    rehearse(live, bundle, root)
++
++            self.assertEqual(calls, [live, live])
++            pointers = list(root.rglob("selection.json"))
++            self.assertEqual(len(pointers), 1)
++            self.assertEqual(selected(pointers[0]), live)
++            self.assertEqual(validate(live), before)
+diff --git a/stockroom/test_restore_opening_prefix.py b/stockroom/test_restore_opening_prefix.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..535fd70807fc1ae764c07e3ab9f0d5d76edbc24b
+--- /dev/null
++++ b/stockroom/test_restore_opening_prefix.py
+@@ -0,0 +1,39 @@
++"""CP10 negative control: a valid backup with altered opening is not this ledger's history."""
++from contextlib import closing
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++
++from .backup import capture, verify_bundle
++from .environment import connect
++from .restore import rehearse
++from .test_backup import ready
++from .tune import copy_database
++
++
++class RestoreOpeningPrefixTests(unittest.TestCase):
++    def test_valid_foreign_opening_is_refused_without_selection(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            fork = root / "alternate-opening.db"
++            copy_database(live, fork)
++            with closing(connect(fork)) as db:
++                db.execute("BEGIN IMMEDIATE")
++                try:
++                    for table in ("opening_balance", "stock_balance"):
++                        db.execute(
++                            f"UPDATE {table} SET quantity=quantity+1 "
++                            "WHERE item_id='item-bolt' AND location_id='loc-north'"
++                        )
++                    db.execute("COMMIT")
++                except BaseException:
++                    db.execute("ROLLBACK")
++                    raise
++
++            bundle = Path(capture(fork, root)["bundle"])
++            verified, _manifest = verify_bundle(bundle)
++            self.assertTrue(verified["ledger"]["ok"])
++            with self.assertRaisesRegex(ValueError, "opening balances differ"):
++                rehearse(live, bundle, root)
++            self.assertEqual(list(root.glob("stockroom-restore-*")), [])
+diff --git a/stockroom/test_restore_pointer_atomicity.py b/stockroom/test_restore_pointer_atomicity.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..241b8ad2f6db329dafc6084175f6f6597ad08d04
+--- /dev/null
++++ b/stockroom/test_restore_pointer_atomicity.py
+@@ -0,0 +1,86 @@
++"""CP10: a failed atomic pointer replacement leaves no staged selection."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++from unittest.mock import patch
++
++from .restore import select, selected
++
++
++class SelectionAtomicityTests(unittest.TestCase):
++    def test_replace_failure_preserves_original_and_removes_staging(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            original = root / "live.db"
++            candidate = root / "candidate.db"
++            select(pointer, original)
++
++            actual_replace = Path.replace
++
++            def reject_pointer_replace(path, target):
++                if path.name == "selection.next":
++                    raise OSError("injected replace failure")
++                return actual_replace(path, target)
++
++            with patch.object(Path, "replace", autospec=True, side_effect=reject_pointer_replace):
++                with self.assertRaisesRegex(OSError, "injected replace failure"):
++                    select(pointer, candidate)
++
++            self.assertEqual(selected(pointer), original)
++            self.assertEqual(list(root.glob(".selection-*")), [])
++
++    def test_first_replace_failure_does_not_create_pointer(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            with patch.object(Path, "replace", side_effect=OSError("injected replace failure")):
++                with self.assertRaisesRegex(OSError, "injected replace failure"):
++                    select(pointer, root / "candidate.db")
++            self.assertFalse(pointer.exists())
++            self.assertEqual(list(root.glob(".selection-*")), [])
++
++    def test_partial_staging_write_failure_preserves_original(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            original = root / "live.db"
++            select(pointer, original)
++            before = pointer.read_bytes()
++            actual_write = Path.write_text
++
++            def fail_after_partial_write(path, data, **kwargs):
++                if path.name == "selection.next":
++                    actual_write(path, data[:5], **kwargs)
++                    raise OSError("injected partial staging write")
++                return actual_write(path, data, **kwargs)
++
++            with patch.object(Path, "write_text", autospec=True, side_effect=fail_after_partial_write):
++                with self.assertRaisesRegex(OSError, "injected partial staging write"):
++                    select(pointer, root / "candidate.db")
++
++            self.assertEqual(pointer.read_bytes(), before)
++            self.assertEqual(selected(pointer), original)
++            self.assertEqual(list(root.glob(".selection-*")), [])
++
++
++    def test_overlapping_replacements_use_distinct_staging_paths(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            first, second = root / "first.db", root / "second.db"
++            actual_replace = Path.replace
++            paths = []
++
++            def overlap(path, target):
++                paths.append(path)
++                if len(paths) == 1:
++                    select(pointer, second)
++                    self.assertEqual(selected(pointer), second)
++                return actual_replace(path, target)
++
++            with patch.object(Path, "replace", autospec=True, side_effect=overlap):
++                select(pointer, first)
++            self.assertEqual(len(set(paths)), 2)
++            self.assertEqual(selected(pointer), first)
++            self.assertEqual(list(root.glob(".selection-*")), [])
+diff --git a/stockroom/test_restore_selection_failure.py b/stockroom/test_restore_selection_failure.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ae56e1ce3ee1e5de28ff1ac845d633ff2e21764
+--- /dev/null
++++ b/stockroom/test_restore_selection_failure.py
+@@ -0,0 +1,66 @@
++"""CP10: a selection failure after switching must return to the live source."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++from unittest.mock import patch
++
++from .backup import capture, validate
++from .restore import rehearse, selected
++from .test_backup import ready
++
++
++class RestoreSelectionFailureTests(unittest.TestCase):
++    def test_selection_error_after_candidate_switch_returns_to_source(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            before = validate(live)
++            bundle = Path(capture(live, root)["bundle"])
++            from . import restore as restore_module
++            actual_select = restore_module.select
++            calls = []
++
++            def fail_after_switch(pointer, database):
++                actual_select(pointer, database)
++                calls.append(Path(database))
++                if len(calls) == 2:
++                    raise OSError("injected post-selection failure")
++
++            with patch("stockroom.restore.select", side_effect=fail_after_switch):
++                with self.assertRaisesRegex(OSError, "injected post-selection failure"):
++                    rehearse(live, bundle, root)
++
++            self.assertEqual(len(calls), 3)
++            self.assertEqual(calls[0], live)
++            self.assertNotEqual(calls[1], live)
++            self.assertEqual(calls[2], live)
++            pointer = calls[1].parent / "selection.json"
++            self.assertEqual(selected(pointer), live)
++            self.assertEqual(validate(live), before)
++
++
++    def test_double_failure_preserves_both_diagnostics_and_candidate(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            bundle = Path(capture(live, root)["bundle"])
++            from . import restore as restore_module
++            actual_select = restore_module.select
++            calls = []
++
++            def fail_switch_and_return(pointer, database):
++                calls.append(database)
++                if len(calls) == 3:
++                    raise OSError("return blocked")
++                actual_select(pointer, database)
++                if len(calls) == 2:
++                    raise OSError("switch failed after replacement")
++
++            with patch.object(restore_module, "select", side_effect=fail_switch_and_return):
++                with self.assertRaisesRegex(
++                    RuntimeError, "switch failed after replacement.*return blocked.*selection.json"
++                ):
++                    rehearse(live, bundle, root)
++            candidate = calls[1]
++            self.assertTrue(candidate.is_file())
++            self.assertEqual(selected(candidate.parent / "selection.json"), candidate)
+diff --git a/stockroom/test_restore_smoke_failure.py b/stockroom/test_restore_smoke_failure.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..018c539f19f4f75acb7ea99dc36e7d005f80f0c1
+--- /dev/null
++++ b/stockroom/test_restore_smoke_failure.py
+@@ -0,0 +1,24 @@
++"""CP10 negative control: a failed restore smoke must not leave a selectable candidate."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++from unittest import TestCase
++from unittest.mock import patch
++
++from .backup import capture, validate
++from .restore import rehearse
++from .test_backup import ready
++
++
++class RestoreSmokeFailureTests(TestCase):
++    def test_smoke_failure_cleans_candidate_and_preserves_source(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            before = validate(live)
++            bundle = Path(capture(live, root)["bundle"])
++            with patch("stockroom.restore.smoke", side_effect=ValueError("injected smoke failure")) as smoke:
++                with self.assertRaisesRegex(ValueError, "injected smoke failure"):
++                    rehearse(live, bundle, root)
++            smoke.assert_called_once()
++            self.assertEqual(list(root.glob("stockroom-restore-*")), [])
++            self.assertEqual(validate(live), before)
+diff --git a/stockroom/test_restore_source_boundary.py b/stockroom/test_restore_source_boundary.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..99d1fa1e736d9106e8177defe7ab58d82a9b1e2a
+--- /dev/null
++++ b/stockroom/test_restore_source_boundary.py
+@@ -0,0 +1,41 @@
++"""CP10: a source receipt-boundary change during rehearsal must undo selection."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++from unittest.mock import patch
++
++from .backup import capture, validate
++from .restore import rehearse
++from .test_backup import ready
++
++
++class RestoreSourceBoundaryTests(unittest.TestCase):
++    def test_source_watermark_change_returns_pointer_to_live(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            before = validate(live)
++            bundle = Path(capture(live, root)["bundle"])
++            real_validate = validate
++            calls = []
++
++            def changed_source_boundary(path):
++                state = real_validate(path)
++                calls.append(Path(path))
++                # Only the final source recheck is altered. The bundle and
++                # restored database remain valid throughout the rehearsal.
++                if Path(path) == live and calls.count(live) == 2:
++                    return {**state, "watermark": state["watermark"] + 1}
++                return state
++
++            with patch("stockroom.restore.validate", side_effect=changed_source_boundary):
++                with self.assertRaisesRegex(ValueError, "source changed during the rehearsal"):
++                    rehearse(live, bundle, root)
++
++            candidates = list(root.glob("stockroom-restore-*"))
++            self.assertEqual(len(candidates), 1)
++            pointer = candidates[0] / "selection.json"
++            self.assertTrue(pointer.is_file())
++            from .restore import selected
++            self.assertEqual(selected(pointer), live)
++            self.assertEqual(validate(live), before)
+diff --git a/stockroom/test_restore_truncated_prefix.py b/stockroom/test_restore_truncated_prefix.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a1a6854a0c52c18e8cebcdb1b874dd6e35c7bf57
+--- /dev/null
++++ b/stockroom/test_restore_truncated_prefix.py
+@@ -0,0 +1,48 @@
++"""CP10 negative control: a shorter candidate prefix must never match a source."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++
++from .backup import validate
++from .restore import require_history_prefix
++from .test_backup import ready
++from .transfer import Transfer
++from .tune import copy_database
++from .writer import submit
++
++
++class RestoreTruncatedPrefixTests(unittest.TestCase):
++    def test_missing_candidate_receipt_is_rejected_without_mutation(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            candidate = root / "older.db"
++            copy_database(live, candidate)
++            submit(live, Transfer("newer-only", "item-bolt",
++                                  "loc-north", "loc-south", 1))
++            before_live = validate(live)
++            before_candidate = validate(candidate)
++            self.assertEqual(before_live["watermark"], 1)
++            self.assertEqual(before_candidate["watermark"], 0)
++            with self.assertRaisesRegex(ValueError, "receipt history length differs"):
++                require_history_prefix(live, candidate, before_live["watermark"])
++            self.assertEqual(validate(live), before_live)
++            self.assertEqual(validate(candidate), before_candidate)
++
++    def test_extra_candidate_receipt_is_rejected_without_mutation(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            live = ready(root)
++            candidate = root / "newer.db"
++            copy_database(live, candidate)
++            submit(candidate, Transfer("candidate-only", "item-bolt",
++                                       "loc-north", "loc-south", 1))
++            before_live = validate(live)
++            before_candidate = validate(candidate)
++            self.assertEqual(before_live["watermark"], 0)
++            self.assertEqual(before_candidate["watermark"], 1)
++            with self.assertRaisesRegex(ValueError, "receipt history length differs"):
++                require_history_prefix(live, candidate, before_candidate["watermark"])
++            self.assertEqual(validate(live), before_live)
++            self.assertEqual(validate(candidate), before_candidate)
++            self.assertEqual(list(root.rglob("selection.json")), [])

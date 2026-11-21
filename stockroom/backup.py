@@ -21,9 +21,11 @@ def digest(path):
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def validate(path):
+def validate(path, *, standalone=False):
     with closing(connect(path, read_only=True)) as db:
         db.execute("BEGIN")
+        if standalone and db.execute("PRAGMA journal_mode").fetchone() != ("delete",):
+            raise ValueError("bundle database must use DELETE journal mode")
         state = require_ledger(db)
         if state["schema_version"] != 2:
             raise ValueError("backup or restore requires schema v2")
@@ -80,12 +82,16 @@ def verify_bundle(bundle):
     file, metadata = bundle / "ledger.db", bundle / "manifest.json"
     if any(p.is_symlink() or not p.is_file() for p in (file, metadata)):
         raise ValueError("backup files must be regular files")
+    for suffix in ("-journal", "-wal", "-shm"):
+        sidecar = file.with_name(file.name + suffix)
+        if sidecar.exists() or sidecar.is_symlink():
+            raise ValueError(f"unexpected SQLite sidecar in bundle: {sidecar.name}")
     manifest = json.loads(metadata.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or type(manifest.get("captured_at_ns")) is not int:
         raise ValueError("invalid manifest")
     if digest(file) != manifest.get("sha256"):
         raise ValueError("backup digest mismatch")
-    state = validate(file)
+    state = validate(file, standalone=True)
     for key in ("schema_version", "workspace_id", "watermark"):
         if state[key] != manifest.get(key):
             raise ValueError(f"backup metadata mismatch: {key}")

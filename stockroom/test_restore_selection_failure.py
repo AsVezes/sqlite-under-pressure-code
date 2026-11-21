@@ -37,3 +37,30 @@ class RestoreSelectionFailureTests(unittest.TestCase):
             pointer = calls[1].parent / "selection.json"
             self.assertEqual(selected(pointer), live)
             self.assertEqual(validate(live), before)
+
+
+    def test_double_failure_preserves_both_diagnostics_and_candidate(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            live = ready(root)
+            bundle = Path(capture(live, root)["bundle"])
+            from . import restore as restore_module
+            actual_select = restore_module.select
+            calls = []
+
+            def fail_switch_and_return(pointer, database):
+                calls.append(database)
+                if len(calls) == 3:
+                    raise OSError("return blocked")
+                actual_select(pointer, database)
+                if len(calls) == 2:
+                    raise OSError("switch failed after replacement")
+
+            with patch.object(restore_module, "select", side_effect=fail_switch_and_return):
+                with self.assertRaisesRegex(
+                    RuntimeError, "switch failed after replacement.*return blocked.*selection.json"
+                ):
+                    rehearse(live, bundle, root)
+            candidate = calls[1]
+            self.assertTrue(candidate.is_file())
+            self.assertEqual(selected(candidate.parent / "selection.json"), candidate)

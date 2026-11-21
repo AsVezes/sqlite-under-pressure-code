@@ -16,12 +16,29 @@ import sys
 ROOT = Path(__file__).resolve().parent
 PILOTS = ("l05_atomicity", "l08_rollback_recovery", "l08_spill_controls", "l09_wal_views", "l10_checkpoint", "l10_writer_busy", "l11_stale_snapshot")
 COMMAND_TIMEOUT_SECONDS = 120
+TEST_COUNT = re.compile(r"^Ran (\d+) tests? in \d+(?:\.\d+)?s$", re.MULTILINE)
+TEST_FOOTER = re.compile(
+    r"^Ran (\d+) tests? in \d+(?:\.\d+)?s\n\nOK(?: \(skipped=(\d+)\))?\Z",
+    re.MULTILINE,
+)
 
 
 def _decoded(value):
     if value is None:
         return ""
     return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+
+
+def unittest_passed(stdout, stderr):
+    # unittest writes its summary to stderr. Reject conflicting or duplicate
+    # structured summaries without forbidding ordinary test output on stdout.
+    summaries = TEST_COUNT.findall(stderr)
+    if len(summaries) != 1 or TEST_COUNT.search(stdout):
+        return False
+    if re.search(r"(?m)^FAILED\b", stderr) or re.search(r"(?m)^FAILED\b", stdout):
+        return False
+    footer = TEST_FOOTER.search(stderr.rstrip())
+    return footer is not None and int(footer[1]) > int(footer[2] or 0)
 
 
 def run_one(name):
@@ -65,17 +82,10 @@ def run_one(name):
                 except (ValueError, TypeError, AttributeError):
                     record["error"] = "invalid probe JSON"
                     record["ok"] = False
-            if argv == commands[0] and process.returncode == 0:
-                # A zero exit without a positive unittest summary is not proof of discovery.
-                summary = re.search(r"(?m)^Ran ([0-9]+) tests? in ", process.stderr)
-                ok_summary = re.search(r"(?m)^OK(?: \(([^\n]*)\))?\s*$", process.stderr)
-                skipped = re.search(r"(?:^|, )skipped=([0-9]+)(?:,|$)", ok_summary.group(1) or "") if ok_summary else None
-                if (summary is None or int(summary.group(1)) == 0
-                        or ok_summary is None
-                        or (skipped is not None and int(skipped.group(1)) >= int(summary.group(1)))
-                        or re.search(r"(?m)^FAILED\b", process.stderr)):
-                    record["error"] = "missing positive unittest success evidence"
-                    record["ok"] = False
+            if (argv == commands[0] and process.returncode == 0
+                    and not unittest_passed(process.stdout, process.stderr)):
+                record["error"] = "missing positive unittest success evidence"
+                record["ok"] = False
             results.append(record)
         except subprocess.TimeoutExpired as exc:
             # Do not report a timed-out or killed child as a successful experiment.

@@ -101,6 +101,28 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["commands"][0]["error"], "missing positive unittest success evidence")
 
+    def test_zero_exit_with_nonterminal_or_conflicting_summary_is_rejected(self):
+        probe = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
+                               "sqlite_source_id": "test-id", "sqlite_version": "test-version"}),
+            stderr="",
+        )
+        cases = [
+            ("", UNITTEST_OK + "ERROR: postscript\n"),
+            ("Ran 0 tests in 0.000s\n", UNITTEST_OK),
+            ("", "Ran 0 tests in 0.000s\n" + UNITTEST_OK),
+            ("", UNITTEST_OK.replace("OK", "OK (expected failures=1)")),
+        ]
+        for stdout, stderr in cases:
+            with self.subTest(stdout=stdout, stderr=stderr):
+                tests = subprocess.CompletedProcess(["python"], 0, stdout=stdout, stderr=stderr)
+                with patch.object(run_e1.subprocess, "run", side_effect=[tests, probe]):
+                    result = run_e1.run_one("l05_atomicity")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["commands"][0]["error"],
+                                 "missing positive unittest success evidence")
+
     def test_nonzero_child_is_not_success(self):
         outcomes = [
             subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK),

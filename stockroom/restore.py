@@ -1,9 +1,10 @@
 """CP10: admit a verified restore in isolation and rehearse cutover and return."""
 from contextlib import closing
+from itertools import zip_longest
 import json
 from pathlib import Path
 import shutil
-from tempfile import mkdtemp
+from tempfile import TemporaryDirectory, mkdtemp
 from time import monotonic_ns
 from uuid import uuid4
 
@@ -34,12 +35,11 @@ def restore(bundle, parent):
 
 
 def select(pointer, database):
-    staged = pointer.with_suffix(".next")
-    try:
+    # Separate staging paths prevent overlapping replacements from sharing a file.
+    with TemporaryDirectory(dir=pointer.parent, prefix=".selection-") as directory:
+        staged = Path(directory) / "selection.next"
         staged.write_text(json.dumps({"database": str(database)}) + "\n", encoding="utf-8")
         staged.replace(pointer)
-    finally:
-        staged.unlink(missing_ok=True)
 
 
 def selected(pointer):
@@ -58,7 +58,6 @@ def require_history_prefix(live, restored, cut):
         """
         if source.execute(opening).fetchall() != candidate.execute(opening).fetchall():
             raise ValueError("backup opening balances differ from the source")
-        from itertools import zip_longest
         missing = object()
         for source_row, candidate_row in zip_longest(
             source.execute(history, (cut,)), candidate.execute(history, (cut,)),
@@ -105,7 +104,8 @@ def smoke(path, expected):
             if not inspect_connection(db)["ok"]:
                 raise ValueError("write smoke failed ledger reconciliation")
         finally:
-            db.execute("ROLLBACK")
+            if db.in_transaction:
+                db.execute("ROLLBACK")
     after = validate(path)
     if (after["ledger"], after["watermark"]) != (expected["ledger"], expected["watermark"]):
         raise ValueError("write smoke changed ledger")
@@ -127,6 +127,7 @@ def rehearse(live, bundle, parent):
         shutil.rmtree(restored.parent)
         raise
     pointer = restored.parent / "selection.json"
+    failure = None
     try:
         select(pointer, live)
         select(pointer, restored)
@@ -136,8 +137,18 @@ def rehearse(live, bundle, parent):
         current = validate(live)
         if (current["ledger"], current["watermark"]) != (original["ledger"], original["watermark"]):
             raise ValueError("source changed during the rehearsal")
+    except BaseException as error:
+        failure = error
+        raise
     finally:
-        select(pointer, live)
+        try:
+            select(pointer, live)
+        except OSError as return_failure:
+            previous = f"rehearsal failed ({failure}); " if failure is not None else ""
+            raise RuntimeError(
+                f"{previous}return to source failed ({return_failure}); "
+                f"verify selection at {pointer} before admitting writes"
+            ) from return_failure
     return {"restored": str(restored), "selection": str(pointer),
             "returned_to": str(selected(pointer)), "source_watermark": original["watermark"],
             "restored_watermark": candidate["watermark"], "rpo_operations": gap,
