@@ -24,7 +24,25 @@ class RestoreTruncatedPrefixTests(unittest.TestCase):
             before_candidate = validate(candidate)
             self.assertEqual(before_live["watermark"], 1)
             self.assertEqual(before_candidate["watermark"], 0)
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "receipt history length differs"):
                 require_history_prefix(live, candidate, before_live["watermark"])
             self.assertEqual(validate(live), before_live)
             self.assertEqual(validate(candidate), before_candidate)
+
+    def test_extra_candidate_receipt_is_rejected_without_mutation(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            live = ready(root)
+            candidate = root / "newer.db"
+            copy_database(live, candidate)
+            submit(candidate, Transfer("candidate-only", "item-bolt",
+                                       "loc-north", "loc-south", 1))
+            before_live = validate(live)
+            before_candidate = validate(candidate)
+            self.assertEqual(before_live["watermark"], 0)
+            self.assertEqual(before_candidate["watermark"], 1)
+            with self.assertRaisesRegex(ValueError, "receipt history length differs"):
+                require_history_prefix(live, candidate, before_candidate["watermark"])
+            self.assertEqual(validate(live), before_live)
+            self.assertEqual(validate(candidate), before_candidate)
+            self.assertEqual(list(root.rglob("selection.json")), [])
