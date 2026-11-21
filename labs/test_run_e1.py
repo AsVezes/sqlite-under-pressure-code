@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 import run_e1
 
+UNITTEST_OK = "----------------------------------------------------------------------\\nRan 1 test in 0.001s\\n\\nOK\\n"
+
 
 class RunnerSupervisionTests(unittest.TestCase):
     def test_e1_manifest_covers_wal_visibility_and_contention(self):
@@ -24,7 +26,7 @@ class RunnerSupervisionTests(unittest.TestCase):
                 self.assertTrue((run_e1.ROOT / ("test_" + name + ".py")).is_file())
 
     def test_success_requires_both_child_exit_codes_zero(self):
-        completed = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr="")
+        completed = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr=UNITTEST_OK)
         with patch.object(run_e1.subprocess, "run", return_value=completed) as call:
             result = run_e1.run_one("l05_atomicity")
         self.assertTrue(result["ok"])
@@ -38,15 +40,23 @@ class RunnerSupervisionTests(unittest.TestCase):
 
     def test_zero_discovered_tests_is_not_success(self):
         empty = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="----------------------------------------------------------------------\nRan 0 tests in 0.000s\n\nOK\n")
+        probe = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr=UNITTEST_OK)
+        with patch.object(run_e1.subprocess, "run", side_effect=[empty, probe]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][0]["error"], "no positive unittest discovery summary")
+
+    def test_missing_unittest_summary_is_not_success(self):
+        empty = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
         probe = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr="")
         with patch.object(run_e1.subprocess, "run", side_effect=[empty, probe]):
             result = run_e1.run_one("l05_atomicity")
         self.assertFalse(result["ok"])
-        self.assertEqual(result["commands"][0]["error"], "zero tests discovered")
+        self.assertEqual(result["commands"][0]["error"], "no positive unittest discovery summary")
 
     def test_nonzero_child_is_not_success(self):
         outcomes = [
-            subprocess.CompletedProcess(["python"], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK),
             subprocess.CompletedProcess(["python"], 1, stdout="", stderr="failed"),
         ]
         with patch.object(run_e1.subprocess, "run", side_effect=outcomes):
@@ -58,7 +68,7 @@ class RunnerSupervisionTests(unittest.TestCase):
         timed_out = subprocess.TimeoutExpired(
             cmd=["python"], timeout=120, output=b"partial stdout", stderr=b"partial stderr"
         )
-        completed = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr="")
+        completed = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr=UNITTEST_OK)
         with patch.object(run_e1.subprocess, "run", side_effect=[timed_out, completed]):
             result = run_e1.run_one("l05_atomicity")
         self.assertFalse(result["ok"])
@@ -70,7 +80,7 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertEqual(first["stderr"], "partial stderr")
 
     def test_launch_failure_does_not_abort_next_child(self):
-        completed = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr="")
+        completed = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr=UNITTEST_OK)
         with patch.object(run_e1.subprocess, "run", side_effect=[OSError("launch refused"), completed]):
             result = run_e1.run_one("l05_atomicity")
         self.assertFalse(result["ok"])
@@ -79,7 +89,7 @@ class RunnerSupervisionTests(unittest.TestCase):
 
 
     def test_zero_exit_with_failed_oracle_is_rejected(self):
-        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK)
         bad = subprocess.CompletedProcess(
             ["python"], 0,
             stdout=json.dumps({"status": "fail", "oracles": {"valid": False},
@@ -92,8 +102,8 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
 
     def test_zero_exit_with_unparseable_probe_is_rejected(self):
-        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
-        bad = subprocess.CompletedProcess(["python"], 0, stdout="not-json", stderr="")
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK)
+        bad = subprocess.CompletedProcess(["python"], 0, stdout="not-json", stderr=UNITTEST_OK)
         with patch.object(run_e1.subprocess, "run", side_effect=[good, bad]):
             result = run_e1.run_one("l05_atomicity")
         self.assertFalse(result["ok"])
@@ -101,7 +111,7 @@ class RunnerSupervisionTests(unittest.TestCase):
 
 
     def test_zero_exit_without_sqlite_identity_is_rejected(self):
-        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK)
         missing = subprocess.CompletedProcess(
             ["python"], 0,
             stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
@@ -114,7 +124,7 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
 
     def test_zero_exit_with_empty_oracles_is_rejected(self):
-        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK)
         missing = subprocess.CompletedProcess(
             ["python"], 0,
             stdout=json.dumps({"status": "pass", "oracles": {},
@@ -127,7 +137,7 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
 
     def test_zero_exit_with_non_boolean_oracle_is_rejected(self):
-        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK)
         invalid = subprocess.CompletedProcess(
             ["python"], 0,
             stdout=json.dumps({"status": "pass", "oracles": {"valid": 1},
@@ -141,15 +151,15 @@ class RunnerSupervisionTests(unittest.TestCase):
 
 
     def test_zero_exit_with_non_object_json_is_rejected(self):
-        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
-        malformed = subprocess.CompletedProcess(["python"], 0, stdout='["pass"]', stderr="")
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK)
+        malformed = subprocess.CompletedProcess(["python"], 0, stdout='["pass"]', stderr=UNITTEST_OK)
         with patch.object(run_e1.subprocess, "run", side_effect=[good, malformed]):
             result = run_e1.run_one("l05_atomicity")
         self.assertFalse(result["ok"])
         self.assertEqual(result["commands"][1]["error"], "invalid probe JSON")
 
     def test_zero_exit_with_nested_empty_identity_is_rejected(self):
-        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr=UNITTEST_OK)
         malformed = subprocess.CompletedProcess(
             ["python"], 0,
             stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
