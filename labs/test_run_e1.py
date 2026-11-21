@@ -36,6 +36,14 @@ class RunnerSupervisionTests(unittest.TestCase):
             self.assertEqual(kwargs["timeout"], run_e1.COMMAND_TIMEOUT_SECONDS)
             self.assertEqual(kwargs["cwd"], run_e1.ROOT)
 
+    def test_zero_discovered_tests_is_not_success(self):
+        empty = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="----------------------------------------------------------------------\nRan 0 tests in 0.000s\n\nOK\n")
+        probe = subprocess.CompletedProcess(["python"], 0, stdout=json.dumps({"status": "pass", "oracles": {"valid": True}, "sqlite_source_id": "test-id", "sqlite_version": "test-version"}), stderr="")
+        with patch.object(run_e1.subprocess, "run", side_effect=[empty, probe]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][0]["error"], "zero tests discovered")
+
     def test_nonzero_child_is_not_success(self):
         outcomes = [
             subprocess.CompletedProcess(["python"], 0, stdout="", stderr=""),
