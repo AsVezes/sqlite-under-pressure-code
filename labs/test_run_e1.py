@@ -132,5 +132,28 @@ class RunnerSupervisionTests(unittest.TestCase):
         self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
 
 
+    def test_zero_exit_with_non_object_json_is_rejected(self):
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        malformed = subprocess.CompletedProcess(["python"], 0, stdout='["pass"]', stderr="")
+        with patch.object(run_e1.subprocess, "run", side_effect=[good, malformed]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][1]["error"], "invalid probe JSON")
+
+    def test_zero_exit_with_nested_empty_identity_is_rejected(self):
+        good = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        malformed = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"status": "pass", "oracles": {"valid": True},
+                               "environment": {}, "sqlite_version": "outer-version",
+                               "sqlite_source_id": "outer-source"}),
+            stderr="",
+        )
+        with patch.object(run_e1.subprocess, "run", side_effect=[good, malformed]):
+            result = run_e1.run_one("l05_atomicity")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["commands"][1]["error"], "invalid probe evidence")
+
+
 if __name__ == "__main__":
     unittest.main()
