@@ -37,6 +37,11 @@ class SnapshotRetryPolicyTests(unittest.TestCase):
                 self.assertEqual(a.execute("SELECT n FROM t").fetchone()[0], 0)
                 a.execute("ROLLBACK")
                 self.assertEqual(a.execute("SELECT n FROM t").fetchone()[0], 1)
+                # Recovery is a new transaction, not an in-place statement retry.
+                a.execute("BEGIN IMMEDIATE")
+                a.execute("UPDATE t SET n=n+1 WHERE id=1")
+                a.execute("COMMIT")
+                self.assertEqual(b.execute("SELECT n FROM t").fetchone()[0], 2)
                 self.assertEqual(a.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             finally:
                 if a.in_transaction:
