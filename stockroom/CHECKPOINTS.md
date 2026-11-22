@@ -122,7 +122,16 @@ the added and removed lines before applying each patch. You can implement the
 listed changes in an editor and use the patch as the exact reference for any
 supporting code. Apply a step once. Follow the chapter's own database commands
 and keep its exit state before moving on. The [tree manifest](steps/trees.json)
-gives the expected source tree after every step.
+gives the expected source tree after every step. Its `archive_commit` values
+identify historical direct-entry snapshots; its `input_tree` and `output_tree`
+identify the **numbered-patch build-along** source states. In particular,
+CP08–CP11 include repairs folded into the numbered patches, whereas their
+historical snapshot commits predate those repairs. Do not equate the manifest's
+`output_tree` with the Git root tree of an `archive_commit`, or treat a missing
+GitHub tree-object URL as proof that the patch cannot be applied. To validate
+an `output_tree`, apply the patches cumulatively to the stated entrance, then
+compare `git write-tree` in an initialized, clean worktree (including the
+tracked file set). This comparison has not been independently replayed here.
 
 For direct entry into the historical CP08 snapshot, apply
 [`cp08-repair.patch`](steps/cp08-repair.patch) before running the chapter.
