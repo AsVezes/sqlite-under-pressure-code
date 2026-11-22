@@ -74,6 +74,30 @@ class LostAckTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_invalid_idempotency_keys_fail_closed(self):
+        # SQLite rowid tables may permit multiple NULLs in TEXT PRIMARY KEY.
+        # The API and schema must reject NULL, blank and whitespace-only keys.
+        with tempfile.TemporaryDirectory(prefix="l14-key-negative-") as root:
+            db = setup(Path(root) / "invalid-key.sqlite3")
+            try:
+                baseline = snapshot(db)
+                for key in (None, "", "   ", 42):
+                    with self.subTest(key=key):
+                        with self.assertRaisesRegex(RuntimeError, "INVALID_IDEMPOTENCY_KEY"):
+                            transfer(db, key, 3)
+                        self.assertFalse(db.in_transaction)
+                        self.assertEqual(snapshot(db), baseline)
+                for key in (None, "", "   "):
+                    with self.subTest(schema_key=key):
+                        with self.assertRaises(sqlite3.IntegrityError):
+                            db.execute("INSERT INTO receipts(id,amount) VALUES (?,3)", (key,))
+                        self.assertEqual(snapshot(db), baseline)
+                self.assertEqual(transfer(db, "valid-key", 3), "applied")
+                self.assertEqual(transfer(db, "valid-key", 3), "replayed")
+                self.assertEqual(snapshot(db)["stock"], [("A", 7), ("B", 3)])
+            finally:
+                db.close()
+
     def test_negative_oracle_survives_optimized_python(self):
         with self.assertRaisesRegex(RuntimeError, "ORACLE_FALSE"):
             require(False, "ORACLE_FALSE")
