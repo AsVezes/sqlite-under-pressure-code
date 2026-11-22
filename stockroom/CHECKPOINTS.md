@@ -129,9 +129,15 @@ CP08–CP11 include repairs folded into the numbered patches, whereas their
 historical snapshot commits predate those repairs. Do not equate the manifest's
 `output_tree` with the Git root tree of an `archive_commit`, or treat a missing
 GitHub tree-object URL as proof that the patch cannot be applied. To validate
-an `output_tree`, apply the patches cumulatively to the stated entrance, then
-compare `git write-tree` in an initialized, clean worktree (including the
-tracked file set). This comparison has not been independently replayed here.
+an `output_tree`, apply the patches cumulatively to the stated entrance in a
+disposable source copy, initialize Git if starting from a ZIP, and stage the
+complete source state with `git add -A` before running `git write-tree`.
+`git apply` without `--index` changes the worktree but does **not** stage those
+changes: running `git write-tree` immediately afterward hashes the old index,
+not the reconstructed checkpoint. Compare the resulting tree ID with the
+manifest's `output_tree` at each step. Keep the database and downloaded patch
+files outside the source tree so they cannot contaminate the staged tree.
+This comparison has not been independently replayed here.
 
 For direct entry into the historical CP08 snapshot, apply
 [`cp08-repair.patch`](steps/cp08-repair.patch) before running the chapter.
