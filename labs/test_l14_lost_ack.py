@@ -50,6 +50,30 @@ class LostAckTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_failed_business_operations_leave_no_receipt_or_debit(self):
+        # A rejected request must not reserve its idempotency key or change stock.
+        with tempfile.TemporaryDirectory(prefix="l14-rejected-") as root:
+            db = setup(Path(root) / "rejected.sqlite3")
+            try:
+                initial = snapshot(db)
+                for key, amount, reason in (
+                    ("invalid", 0, "INVALID_AMOUNT"),
+                    ("insufficient", 11, "INSUFFICIENT_STOCK"),
+                ):
+                    with self.subTest(reason=reason):
+                        with self.assertRaisesRegex(RuntimeError, reason):
+                            transfer(db, key, amount)
+                        self.assertFalse(db.in_transaction)
+                        self.assertEqual(snapshot(db), initial)
+                # A failed request with this key did not consume the receipt.
+                self.assertEqual(transfer(db, "insufficient", 3), "applied")
+                self.assertEqual(snapshot(db), {
+                    "stock": [("A", 7), ("B", 3)],
+                    "receipts": [("insufficient", 3)],
+                })
+            finally:
+                db.close()
+
     def test_negative_oracle_survives_optimized_python(self):
         with self.assertRaisesRegex(RuntimeError, "ORACLE_FALSE"):
             require(False, "ORACLE_FALSE")
