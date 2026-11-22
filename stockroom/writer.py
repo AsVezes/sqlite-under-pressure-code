@@ -27,14 +27,16 @@ def require_receipt_trigger(db):
 def install(path):
     with closing(connect(path)) as db, write_transaction(db):
         require_ledger(db)
-        db.executescript(f"""
-            CREATE TABLE IF NOT EXISTS receipt(
+        # executescript() commits a pending transaction before executing its SQL.
+        # Use individual statements so DDL, backfill and validation roll back together.
+        db.execute("""CREATE TABLE IF NOT EXISTS receipt(
               seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
-            ) STRICT;
-            INSERT INTO receipt(transfer_id)
-              SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid;
-            {RECEIPT_TRIGGER.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1)};
-        """)
+            ) STRICT""")
+        db.execute("""INSERT INTO receipt(transfer_id)
+              SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid""")
+        db.execute(RECEIPT_TRIGGER.replace(
+            "CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1
+        ))
         require_receipt_trigger(db)
         return {"receipt_count": watermark(db)}
 
