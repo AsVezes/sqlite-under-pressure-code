@@ -55,6 +55,7 @@ def rebuild(db, fail=False, omit_index=False):
     # Legacy FK references retain the original table name; use a fresh replacement
     # and preserve the parent name. Foreign keys are checked before COMMIT.
     db.execute("begin immediate")
+    db.execute("pragma defer_foreign_keys=ON")
     try:
         db.execute("create table items_new(id integer primary key, sku text not null unique, "
                    "qty integer not null check(qty >= 0), note text not null default '')")
