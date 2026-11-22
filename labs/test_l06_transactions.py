@@ -25,6 +25,11 @@ class L06Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported mode"):
             lab.scenario("EXCLUSIVE")
 
+    def test_sql_injection_mode_rejected_before_database_creation(self):
+        with patch.object(lab.tempfile, "TemporaryDirectory", side_effect=AssertionError("fixture created")):
+            with self.assertRaisesRegex(ValueError, "unsupported mode"):
+                lab.scenario("IMMEDIATE; DROP TABLE inventory")
+
     def test_negative_control(self):
         with self.assertRaisesRegex(RuntimeError, "oracle failed"):
             lab.require(False, "deliberate false condition")
