@@ -34,6 +34,22 @@ class WriterTests(unittest.TestCase):
             self.assertEqual(watermark(db), 1)
         self.assertTrue(check_ledger(self.path)["ok"])
 
+    def test_failed_install_rolls_back_receipt_schema_and_backfill(self):
+        # A conflicting trigger must not leave an installed receipt table behind.
+        transfer(self.path, self.request)
+        with closing(connect(self.path)) as db:
+            db.execute("""CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer
+                          BEGIN SELECT 1; END""")
+        with self.assertRaisesRegex(ValueError, "receipt trigger"):
+            install(self.path)
+        with closing(connect(self.path)) as db:
+            names = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name='receipt'"
+            )}
+            self.assertEqual(names, set())
+            self.assertEqual(db.execute("SELECT count(*) FROM transfer").fetchone()[0], 1)
+        self.assertTrue(check_ledger(self.path)["ok"])
+
     def test_held_writer_cannot_change_state_and_budget_is_classified(self):
         install(self.path)
         with closing(connect(self.path)) as db:
