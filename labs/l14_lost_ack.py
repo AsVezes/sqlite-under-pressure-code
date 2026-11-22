@@ -30,6 +30,7 @@ def identity(db):
 
 def transfer(db, key, amount):
     """Atomic receipt and movement; reject changed payloads."""
+    require(isinstance(key, str) and bool(key.strip()), "INVALID_IDEMPOTENCY_KEY")
     db.execute("BEGIN IMMEDIATE")
     try:
         previous = db.execute("SELECT amount FROM receipts WHERE id=?", (key,)).fetchone()
@@ -90,7 +91,7 @@ def setup(path):
     db.executescript("""
         PRAGMA journal_mode=DELETE;
         CREATE TABLE stock(location TEXT PRIMARY KEY, qty INTEGER NOT NULL CHECK(qty>=0));
-        CREATE TABLE receipts(id TEXT PRIMARY KEY, amount INTEGER NOT NULL CHECK(amount>0));
+        CREATE TABLE receipts(id TEXT PRIMARY KEY NOT NULL CHECK(length(trim(id))>0), amount INTEGER NOT NULL CHECK(amount>0));
         INSERT INTO stock VALUES ('A',10),('B',0);
     """)
     return db
