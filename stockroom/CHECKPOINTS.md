@@ -86,8 +86,10 @@ python3 -m stockroom.migrate "$DB" --batch-size 1
 # CP09
 BACKUPS="${DB%/*}/backups"
 mkdir -p "$BACKUPS"
-python3 -m stockroom.backup "$DB" "$BACKUPS"
-# CP10 (set BUNDLE to the path returned in the CP09 JSON)
+BACKUP_JSON=$(python3 -m stockroom.backup "$DB" "$BACKUPS")
+printf '%s\n' "$BACKUP_JSON"
+BUNDLE=$(printf '%s\n' "$BACKUP_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundle"])')
+# CP10 (BUNDLE is the verified bundle path returned by CP09)
 python3 -m stockroom.writer "$DB" submit tx-after-cut item-bolt loc-north loc-south 1
 python3 -m stockroom.restore "$DB" "$BUNDLE" "$BACKUPS"
 # CP11
