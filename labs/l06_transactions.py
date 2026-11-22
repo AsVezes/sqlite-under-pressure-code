@@ -59,7 +59,15 @@ def scenario(mode):
             require(not a.in_transaction and not b.in_transaction, mode + ":transactions_closed")
             observed = b.execute("SELECT qty FROM inventory WHERE id=1").fetchone()[0]
             integrity = b.execute("PRAGMA integrity_check").fetchone()[0]
-            checks = {"busy_code": conflict["code"] == sqlite3.SQLITE_BUSY,
+            # Reopen a fresh connection: an in-connection SELECT alone is not a durability oracle.
+            with sqlite3.connect(path) as verifier:
+                persisted = verifier.execute(
+                    "SELECT qty FROM inventory WHERE id=1").fetchone()[0]
+                persisted_integrity = verifier.execute(
+                    "PRAGMA integrity_check").fetchone()[0]
+            checks = {"reopened_balance": persisted == expected,
+                      "reopened_integrity": persisted_integrity == "ok",
+                      "busy_code": conflict["code"] == sqlite3.SQLITE_BUSY,
                       "busy_name": conflict["name"] == "SQLITE_BUSY",
                       "expected_balance": observed == expected,
                       "integrity": integrity == "ok",
@@ -67,7 +75,7 @@ def scenario(mode):
             for name, ok in checks.items():
                 require(ok, mode + ":" + name)
             return {"mode": mode, "conflict": conflict,
-                    "quantity": observed, "checks": checks}
+                    "quantity": observed, "reopened_quantity": persisted, "checks": checks}
         finally:
             if a.in_transaction:
                 a.rollback()
