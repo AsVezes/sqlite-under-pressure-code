@@ -84,7 +84,16 @@ def initialize_ledger(path: Path) -> dict:
     with closing(connect(path)) as db:
         with write_transaction(db):
             require_version(db, 0)
-            db.executescript(SCHEMA_V1.read_text(encoding="utf-8"))
+            # executescript() commits a pending transaction before executing SQL.
+            # Execute complete DDL statements within the existing BEGIN IMMEDIATE.
+            statement = ""
+            for line in SCHEMA_V1.read_text(encoding="utf-8").splitlines(keepends=True):
+                statement += line
+                if sqlite3.complete_statement(statement):
+                    db.execute(statement)
+                    statement = ""
+            if statement.strip():
+                raise ValueError("Incomplete Stockroom v1 schema statement")
             seed_f1(db)
             db.execute("PRAGMA user_version=1")
         return identity(db)
