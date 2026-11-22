@@ -116,7 +116,8 @@ def run():
             checks["different_payload_rejected"] = str(error) == "IDEMPOTENCY_CONFLICT"
         else:
             checks["different_payload_rejected"] = False
-        checks["unchanged_after_conflict"] = snapshot(db)["receipts"] == [("op-1", 3)]
+        checks["unchanged_after_conflict"] = snapshot(db) == {
+            "stock": [("A", 7), ("B", 3)], "receipts": [("op-1", 3)]}
         checks["integrity"] = db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         db.close()
 
