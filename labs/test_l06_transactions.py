@@ -12,6 +12,17 @@ class L06Tests(unittest.TestCase):
         self.assertTrue(all(all(r["checks"].values()) for r in report["results"]))
         self.assertTrue(report["environment"]["sqlite_source_id"])
 
+    def test_quantities_and_primary_busy_codes(self):
+        report = lab.run()
+        self.assertEqual([r["quantity"] for r in report["results"]], [11, 13])
+        for result in report["results"]:
+            self.assertEqual(result["conflict"]["code"], lab.sqlite3.SQLITE_BUSY)
+            self.assertEqual(result["conflict"]["name"], "SQLITE_BUSY")
+
+    def test_unsupported_mode_fails_explicitly(self):
+        with self.assertRaisesRegex(ValueError, "unsupported mode"):
+            lab.scenario("EXCLUSIVE")
+
     def test_negative_control(self):
         with self.assertRaisesRegex(RuntimeError, "oracle failed"):
             lab.require(False, "deliberate false condition")
