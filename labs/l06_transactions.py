@@ -54,11 +54,13 @@ def scenario(mode):
                 expected = 13
             else:
                 raise ValueError("unsupported mode")
+            require(not a.in_transaction and not b.in_transaction, mode + ":transactions_closed")
             observed = b.execute("SELECT qty FROM inventory WHERE id=1").fetchone()[0]
             integrity = b.execute("PRAGMA integrity_check").fetchone()[0]
             checks = {"busy_code": conflict["code"] == sqlite3.SQLITE_BUSY,
                       "expected_balance": observed == expected,
-                      "integrity": integrity == "ok"}
+                      "integrity": integrity == "ok",
+                      "transactions_closed": not a.in_transaction and not b.in_transaction}
             for name, ok in checks.items():
                 require(ok, mode + ":" + name)
             return {"mode": mode, "conflict": conflict,
