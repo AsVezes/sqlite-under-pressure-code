@@ -77,7 +77,7 @@ def run():
             extended = getattr(sqlite3, "SQLITE_BUSY_SNAPSHOT", 517)
             oracles = {
                 "initial_snapshot_zero": first == 0,
-                "extended_busy_snapshot": error is not None and error["code"] == extended,
+                "extended_busy_snapshot": (error is not None\n                    and error["code"] == extended\n                    and error["name"] == "SQLITE_BUSY_SNAPSHOT"\n                    and (error["code"] & 255) == sqlite3.SQLITE_BUSY),
                 "old_snapshot_still_visible": old_view == 0,
                 "fresh_snapshot_sees_b": fresh_view == 1,
                 "fresh_commit_applies_once": final == 2,
