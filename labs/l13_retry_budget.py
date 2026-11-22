@@ -20,7 +20,7 @@ def require(condition, message):
 
 
 def retry_busy(operation, *, now, deadline, wait, attempts):
-    """Attempt once, then retry primary SQLITE_BUSY within a deadline."""
+    """Retry ordinary SQLITE_BUSY; never retry stale-snapshot promotion in place."""
     history = []
     for index in range(attempts):
         try:
@@ -32,7 +32,8 @@ def retry_busy(operation, *, now, deadline, wait, attempts):
             primary = None if code is None else code & 255
             history.append({"attempt": index + 1, "code": code,
                             "name": getattr(error, "sqlite_errorname", None)})
-            if primary != sqlite3.SQLITE_BUSY or index + 1 >= attempts or now() >= deadline:
+            if (primary != sqlite3.SQLITE_BUSY or code == sqlite3.SQLITE_BUSY_SNAPSHOT
+                    or index + 1 >= attempts or now() >= deadline):
                 raise
             wait()
     raise RuntimeError("unreachable retry state")
