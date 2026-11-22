@@ -11,6 +11,7 @@ class L06Tests(unittest.TestCase):
         self.assertEqual([r["mode"] for r in report["results"]], ["DEFERRED", "IMMEDIATE"])
         self.assertTrue(all(all(r["checks"].values()) for r in report["results"]))
         self.assertTrue(report["environment"]["sqlite_source_id"])
+        self.assertTrue(all(r["checks"]["transactions_closed"] for r in report["results"]))
 
     def test_quantities_and_primary_busy_codes(self):
         report = lab.run()
