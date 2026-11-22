@@ -19,6 +19,7 @@ class L06Tests(unittest.TestCase):
         for result in report["results"]:
             self.assertEqual(result["conflict"]["code"], lab.sqlite3.SQLITE_BUSY)
             self.assertEqual(result["conflict"]["name"], "SQLITE_BUSY")
+            self.assertTrue(result["checks"]["busy_name"])
 
     def test_unsupported_mode_fails_explicitly(self):
         with self.assertRaisesRegex(ValueError, "unsupported mode"):
