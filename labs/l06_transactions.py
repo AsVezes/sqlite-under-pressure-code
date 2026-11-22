@@ -16,6 +16,8 @@ def require(condition, name):
 
 
 def scenario(mode):
+    if mode not in ("DEFERRED", "IMMEDIATE"):
+        raise ValueError("unsupported mode")
     with tempfile.TemporaryDirectory(prefix="sqlite-l06-") as tmp:
         path = Path(tmp) / "lock.sqlite3"
         a = sqlite3.connect(path, timeout=0, isolation_level=None)
