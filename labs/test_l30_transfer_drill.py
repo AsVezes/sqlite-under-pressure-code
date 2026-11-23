@@ -100,7 +100,17 @@ with tempfile.TemporaryDirectory() as root:
             raise
     else:
         raise RuntimeError("optimized mode bypassed balance gate")
-print("negative_balance_gate=PASS")
+    with sqlite3.connect(p) as db:
+        db.execute("UPDATE balance SET amount=1")
+        db.execute("UPDATE receipts SET delta=2 WHERE op_id=1")
+    try:
+        m.check(p, [(1,1)])
+    except RuntimeError as exc:
+        if str(exc) != "receipt continuity mismatch":
+            raise
+    else:
+        raise RuntimeError("optimized mode bypassed receipt gate")
+print("negative_balance_and_receipt_gates=PASS")
 """
         completed = subprocess.run(
             [sys.executable, "-O", "-c", script, str(LAB)],
@@ -110,7 +120,7 @@ print("negative_balance_gate=PASS")
             completed.returncode, 0,
             f"stdout={completed.stdout}\nstderr={completed.stderr}",
         )
-        self.assertEqual(completed.stdout.strip(), "negative_balance_gate=PASS")
+        self.assertEqual(completed.stdout.strip(), "negative_balance_and_receipt_gates=PASS")
         self.assertEqual(completed.stderr, "")
 
 
