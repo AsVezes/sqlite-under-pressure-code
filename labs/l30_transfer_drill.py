@@ -62,7 +62,6 @@ def main():
             require(check(backup, expected_backup) == expected_backup, "backup gate failed")
             backup_sha = digest(backup)
             # Commit acknowledged AFTER the backup cut; this operation is at risk.
-            db.execute("BEGIN IMMEDIATE")
             db.execute("INSERT INTO receipts VALUES(6,1)")
             db.execute("UPDATE balance SET amount=amount+1")
             db.commit()
@@ -78,6 +77,7 @@ def main():
         require(lost == 1, "negative control: expected one acknowledged operation absent")
         with sqlite3.connect(recovered) as db:
             # Replaying a known receipt is idempotent, even after ambiguous acknowledgement.
+            db.execute("BEGIN IMMEDIATE")
             db.execute("INSERT OR IGNORE INTO receipts VALUES(5,1)")
             require(db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 5,
                     "duplicate receipt created")
