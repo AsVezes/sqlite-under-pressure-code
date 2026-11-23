@@ -68,7 +68,7 @@ def main():
         damaged.write_bytes(source.read_bytes())
         with damaged.open("r+b") as handle:
             handle.seek(1024)  # B-tree page after page 1, not the database header
-            handle.write(b"\\x00" * 1024)
+            handle.write(bytes(1024))
         require(sha(source) == sha(backup), "source changed during damage injection")
         damaged_state = None
         try:
