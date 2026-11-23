@@ -127,13 +127,15 @@ and keep its exit state before moving on. The [tree manifest](steps/trees.json)
 records the expected source tree after every step **as last verified**.
 **Gate M warning (2026-11-23):** `cp01.patch` and `cp05.patch` were corrected
 after the manifest was generated. The recorded `output_tree` IDs have **not**
-been recalculated or verified against those corrected patches. Do not use the
-current IDs as evidence that the updated cumulative path passes; treat any
-comparison as diagnostic until a fresh CP00–CP11 replay publishes verified
-replacement IDs. Historical `archive_commit` values are not affected by
-these patch edits. Its `archive_commit` values
-identify historical direct-entry snapshots; its `input_tree` and `output_tree`
-identify the **numbered-patch build-along** source states. In particular,
+been recalculated or verified against those corrected patches. From CP01
+onward, subsequent `input_tree` IDs are also historical: each checkpoint's
+input must equal the actual reconstructed output of its predecessor, not the
+stale manifest entry. Do not use these IDs as evidence that the updated
+cumulative path passes; treat comparisons as diagnostic until a fresh
+CP00–CP11 replay publishes verified replacement IDs. The `archive_commit`
+values remain historical direct-entry snapshots and are unaffected by patch
+edits. The `input_tree` and `output_tree` fields describe the **numbered-patch
+build-along** source states. In particular,
 CP08–CP11 include repairs folded into the numbered patches, whereas their
 historical snapshot commits predate those repairs. Do not equate the manifest's
 `output_tree` with the Git root tree of an `archive_commit`, or treat a missing
