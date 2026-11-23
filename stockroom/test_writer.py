@@ -86,3 +86,31 @@ class WriterTests(unittest.TestCase):
                 for i in range(2, 4)]
         self.assertEqual([row["receipt"] for row in run_queue(self.path, more)], [2, 3])
         self.assertTrue(check_ledger(self.path)["ok"])
+
+    def test_cli_rejects_reused_id_with_different_payload_and_preserves_ledger(self):
+        import json
+        import subprocess
+        import sys
+
+        install(self.path)
+        first = subprocess.run(
+            [sys.executable, "-m", "stockroom.writer", str(self.path), "submit",
+             "op-cli", "item-bolt", "loc-north", "loc-south", "3"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(json.loads(first.stdout)["replayed"], False)
+        before = check_ledger(self.path)
+        rejected = subprocess.run(
+            [sys.executable, "-m", "stockroom.writer", str(self.path), "submit",
+             "op-cli", "item-bolt", "loc-north", "loc-south", "2"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        self.assertEqual(rejected.stdout, "")
+        self.assertEqual(
+            json.loads(rejected.stderr)["error"],
+            "operation ID already committed with a different payload",
+        )
+        self.assertEqual(check_ledger(self.path), before)
+
