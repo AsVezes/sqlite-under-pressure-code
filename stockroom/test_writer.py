@@ -50,6 +50,20 @@ class WriterTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM transfer").fetchone()[0], 1)
         self.assertTrue(check_ledger(self.path)["ok"])
 
+    def test_missing_receipt_trigger_rolls_back_the_entire_transfer(self):
+        install(self.path)
+        before = check_ledger(self.path)
+        with closing(connect(self.path)) as db:
+            db.execute("DROP TRIGGER record_transfer_receipt")
+        # The transfer INSERT can succeed without the trigger, but a receipt
+        # must exist before the transaction is allowed to commit.
+        with self.assertRaisesRegex(ValueError, "did not produce a receipt"):
+            submit(self.path, self.request)
+        self.assertEqual(check_ledger(self.path), before)
+        with closing(connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM transfer").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT count(*) FROM receipt").fetchone()[0], 0)
+
     def test_held_writer_cannot_change_state_and_budget_is_classified(self):
         install(self.path)
         with closing(connect(self.path)) as db:
