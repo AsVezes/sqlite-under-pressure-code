@@ -81,7 +81,6 @@ def main():
             db.execute("INSERT OR IGNORE INTO receipts VALUES(5,1)")
             require(db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 5,
                     "duplicate receipt created")
-            db.execute("BEGIN IMMEDIATE")
             db.execute("INSERT INTO receipts VALUES(6,1)")
             db.execute("UPDATE balance SET amount=amount+1")
             db.commit()
