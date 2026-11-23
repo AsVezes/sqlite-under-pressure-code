@@ -78,6 +78,13 @@ def main():
         with sqlite3.connect(recovered) as db:
             # Replaying a known receipt is idempotent, even after ambiguous acknowledgement.
             db.execute("BEGIN IMMEDIATE")
+            # Reused IDs are idempotent only when the payload matches.
+            stored = db.execute("SELECT delta FROM receipts WHERE op_id=5").fetchone()
+            require(stored == (1,), "replayed receipt payload mismatch")
+            # Negative control: SQLite IGNORE alone would hide this conflict.
+            conflicting = (5, 2)
+            conflict_rejected = stored is not None and stored[0] != conflicting[1]
+            require(conflict_rejected, "negative control: conflicting receipt accepted")
             db.execute("INSERT OR IGNORE INTO receipts VALUES(5,1)")
             require(db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 5,
                     "duplicate receipt created")
@@ -94,6 +101,7 @@ def main():
                           "last_acknowledged": 6, "rpo_operations_observed": lost,
                           "restore_and_reconcile_ms_observed": round(restore_ms, 3),
                           "negative_zero_loss_claim_rejected": True,
+                          "negative_conflicting_receipt_rejected": conflict_rejected,
                           "final_receipts": 6, "oracle": "PASS",
                           "limitations": "Synthetic one-process transfer drill only; no CP11, "
                           "external effects, multi-host failover, real crash or power loss. "
