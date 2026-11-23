@@ -67,7 +67,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..269d22d07b2ff0c05666fb797c7f1236a139948a
 --- /dev/null
 +++ b/stockroom/ledger.py
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,80 @@
 +"""CP01: install schema v1 and load the shared F1 opening balances."""
 +
 +from contextlib import closing, contextmanager
@@ -130,7 +130,15 @@ index 0000000000000000000000000000000000000000..269d22d07b2ff0c05666fb797c7f1236
 +    with closing(connect(path)) as db:
 +        with write_transaction(db):
 +            require_version(db, 0)
-+            db.executescript(SCHEMA_V1.read_text(encoding="utf-8"))
++            # Keep DDL inside BEGIN IMMEDIATE; executescript commits implicitly.
++            statement = ""
++            for line in SCHEMA_V1.read_text(encoding="utf-8").splitlines(keepends=True):
++                statement += line
++                if sqlite3.complete_statement(statement):
++                    db.execute(statement)
++                    statement = ""
++            if statement.strip():
++                raise ValueError("Incomplete Stockroom v1 schema statement")
 +            seed_f1(db)
 +            db.execute("PRAGMA user_version=1")
 +        return identity(db)
