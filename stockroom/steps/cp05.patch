@@ -81,7 +81,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..070869ecf5d5b863116b81623947125bab39178c
 --- /dev/null
 +++ b/stockroom/writer.py
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,117 @@
 +"""CP05: retry a complete transfer with a stable request and durable receipt."""
 +from contextlib import closing
 +import json
@@ -99,15 +99,14 @@ index 0000000000000000000000000000000000000000..070869ecf5d5b863116b81623947125b
 +def install(path):
 +    with closing(connect(path)) as db, write_transaction(db):
 +        require_version(db, 1)
-+        db.executescript("""
-+            CREATE TABLE IF NOT EXISTS receipt(
++        # Separate statements preserve rollback across DDL and receipt backfill.
++        db.execute("""CREATE TABLE IF NOT EXISTS receipt(
 +              seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
-+            ) STRICT;
-+            INSERT INTO receipt(transfer_id)
-+              SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid;
-+            CREATE TRIGGER IF NOT EXISTS record_transfer_receipt AFTER INSERT ON transfer
-+            BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END;
-+        """)
++            ) STRICT""")
++        db.execute("""INSERT INTO receipt(transfer_id)
++              SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid""")
++        db.execute("""CREATE TRIGGER IF NOT EXISTS record_transfer_receipt AFTER INSERT ON transfer
++            BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END""")
 +        return {"receipt_count": watermark(db)}
 +
 +
