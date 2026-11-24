@@ -1,9 +1,9 @@
 diff --git a/stockroom/restore.py b/stockroom/restore.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..c6ca2775eadb8d480b4dc0163fd31530f5ed19f5
+index 0000000000000000000000000000000000000000..191e8a84e545d0f11265bef6ec55a052b609d091
 --- /dev/null
 +++ b/stockroom/restore.py
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,169 @@
 +"""CP10: admit a verified restore in isolation and rehearse cutover and return."""
 +from contextlib import closing
 +from itertools import zip_longest
@@ -149,7 +149,9 @@ index 0000000000000000000000000000000000000000..c6ca2775eadb8d480b4dc0163fd31530
 +    finally:
 +        try:
 +            select(pointer, live)
-+        except OSError as return_failure:
++            if selected(pointer) != live:
++                raise RuntimeError("return selection does not point to the source")
++        except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as return_failure:
 +            previous = f"rehearsal failed ({failure}); " if failure is not None else ""
 +            raise RuntimeError(
 +                f"{previous}return to source failed ({return_failure}); "
@@ -440,10 +442,10 @@ index 0000000000000000000000000000000000000000..535fd70807fc1ae764c07e3ab9f0d5d7
 +            self.assertEqual(list(root.glob("stockroom-restore-*")), [])
 diff --git a/stockroom/test_restore_pointer_atomicity.py b/stockroom/test_restore_pointer_atomicity.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..241b8ad2f6db329dafc6084175f6f6597ad08d04
+index 0000000000000000000000000000000000000000..b81f3fe77519ec748b039ec4685ecceec3d15b06
 --- /dev/null
 +++ b/stockroom/test_restore_pointer_atomicity.py
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,114 @@
 +"""CP10: a failed atomic pointer replacement leaves no staged selection."""
 +from pathlib import Path
 +from tempfile import TemporaryDirectory
@@ -529,6 +531,34 @@ index 0000000000000000000000000000000000000000..241b8ad2f6db329dafc6084175f6f659
 +                select(pointer, first)
 +            self.assertEqual(len(set(paths)), 2)
 +            self.assertEqual(selected(pointer), first)
++            self.assertEqual(list(root.glob(".selection-*")), [])
++
++    def test_failed_outer_replace_does_not_remove_nested_selection(self):
++        """A failing overlapping writer must not delete another writer's staging."""
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            original, outer, nested = (root / name for name in ("live.db", "outer.db", "nested.db"))
++            select(pointer, original)
++            before = pointer.read_bytes()
++            actual_replace = Path.replace
++            staged_paths = []
++
++            def nested_then_fail(path, target):
++                staged_paths.append(path)
++                if len(staged_paths) == 1:
++                    select(pointer, nested)
++                    raise OSError("injected outer replace failure")
++                return actual_replace(path, target)
++
++            with patch.object(Path, "replace", autospec=True, side_effect=nested_then_fail):
++                with self.assertRaisesRegex(OSError, "injected outer replace failure"):
++                    select(pointer, outer)
++
++            self.assertEqual(len(staged_paths), 2)
++            self.assertNotEqual(staged_paths[0].parent, staged_paths[1].parent)
++            self.assertEqual(selected(pointer), nested)
++            self.assertNotEqual(pointer.read_bytes(), before)
 +            self.assertEqual(list(root.glob(".selection-*")), [])
 diff --git a/stockroom/test_restore_selection_failure.py b/stockroom/test_restore_selection_failure.py
 new file mode 100644
