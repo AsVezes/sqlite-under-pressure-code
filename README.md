@@ -56,3 +56,37 @@ python3 labs/run_e1.py
 The runner emits JSON with per-pilot evidence and exit status. Preserve raw output, stderr, return codes, OS/filesystem, Python and SQLite identities, and the source revision for review. Its supervisor tests include mocks and **do not** by themselves prove SQLite concurrency behavior. The standalone probes use disposable workspaces; do not point fault experiments at personal or production databases. CLI and Python SQLite engines must be identified independently. Run and review the missing E1 pilots and the complete acceptance matrix before promoting any checkpoint.
 
 **Status:** implementation/prototyping only; no E1 laboratory, checkpoint, platform matrix, release tag, or edition license is approved merely because these files exist.
+
+## Offline checkpoint replay — CP00–CP11
+
+The numbered `stockroom/steps/cp00.patch` through `cp11.patch` form the
+**build-along** path. The current `stockroom/steps/trees.json` was recalculated
+using content-verified Git blobs and source-tree hashing; this static check
+is **not** a successful run of Git, the labs, or the full reader route.
+
+Download and unpack the public starter at commit
+[26b6888](https://github.com/AsVezes/sqlite-under-pressure-code/commit/26b6888f3ab74fb47248dfde7a113b2afd78b46d).
+In a separate checkout of this kit, use the offline verifier:
+
+~~~sh
+python3 tools/verify_patch_chain.py \
+  --starter "/absolute/path/to/unpacked-starter" \
+  --run-tests \
+  --log-dir "/absolute/path/to/new-empty-evidence-dir"
+~~~
+
+The verifier copies all source files to a fresh temporary checkout, applies
+each numbered patch with Git, stages the tree and compares all twelve
+`git write-tree` IDs with the manifest. It optionally runs Stockroom tests
+after every step and records the evidence. It requires Git and Python,
+**no GitHub Actions or Work sessions**; it never runs on a live database.
+The verifier itself was checked with a synthetic successful patch and an
+adversarial modified patch, not a complete checkout in this environment.
+
+For **direct entry** at historical snapshots CP08–CP11 (a different route),
+use the corresponding `stockroom/steps/cp08-repair.patch`,
+`cp09-repair.patch`, and `cp10-repair.patch` as instructed in
+[the checkpoint guide](stockroom/CHECKPOINTS.md). Repairs are not applied
+again on top of the numbered build-along patches. The direct-entry repair
+preimage hashes have been checked against their historical Git tree
+snapshots, but independent executable replay remains pending.
