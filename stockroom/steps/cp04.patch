@@ -1,8 +1,8 @@
 diff --git a/stockroom/ledger.py b/stockroom/ledger.py
-index 269d22d07b2ff0c05666fb797c7f1236a139948a..a35f625a00d87fc237017460b3e75a3925121fa0 100644
+index 66e2f05fee9ce86f8dba805ebf6ccbc26fd2a629..5f87e3328e70f95e83645bd526f4645656160311 100644
 --- a/stockroom/ledger.py
 +++ b/stockroom/ledger.py
-@@ -13,14 +13,31 @@ SCHEMA_V1 = Path(__file__).with_name("schema_v1.sql")
+@@ -13,14 +13,31 @@
  
  
  @contextmanager
