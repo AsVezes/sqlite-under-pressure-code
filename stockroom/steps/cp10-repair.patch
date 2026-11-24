@@ -1,5 +1,5 @@
 diff --git a/stockroom/restore.py b/stockroom/restore.py
-index cd7e6e095434953814f196d8c5756203f3e84747..c6ca2775eadb8d480b4dc0163fd31530f5ed19f5 100644
+index cd7e6e095434953814f196d8c5756203f3e84747..191e8a84e545d0f11265bef6ec55a052b609d091 100644
 --- a/stockroom/restore.py
 +++ b/stockroom/restore.py
 @@ -1,14 +1,20 @@
@@ -13,9 +13,9 @@ index cd7e6e095434953814f196d8c5756203f3e84747..c6ca2775eadb8d480b4dc0163fd31530
 +from tempfile import TemporaryDirectory, mkdtemp
  from time import monotonic_ns
 +from uuid import uuid4
-+
-+from tools.e1 import inspect_connection
  
++from tools.e1 import inspect_connection
++
  from .backup import digest, validate, verify_bundle
  from .environment import connect
  from .operation import execute, parser
@@ -24,7 +24,7 @@ index cd7e6e095434953814f196d8c5756203f3e84747..c6ca2775eadb8d480b4dc0163fd31530
  
  
  def restore(bundle, parent):
-@@ -29,25 +35,79 @@ def restore(bundle, parent):
+@@ -29,25 +35,79 @@
  
  
  def select(pointer, database):
@@ -110,7 +110,7 @@ index cd7e6e095434953814f196d8c5756203f3e84747..c6ca2775eadb8d480b4dc0163fd31530
          raise ValueError("write smoke changed ledger")
  
  
-@@ -55,21 +115,40 @@ def rehearse(live, bundle, parent):
+@@ -55,21 +115,42 @@
      begin = monotonic_ns()
      original = validate(live)
      restored, candidate = restore(bundle, parent)
@@ -152,7 +152,9 @@ index cd7e6e095434953814f196d8c5756203f3e84747..c6ca2775eadb8d480b4dc0163fd31530
 -        select(pointer, live)
 +        try:
 +            select(pointer, live)
-+        except OSError as return_failure:
++            if selected(pointer) != live:
++                raise RuntimeError("return selection does not point to the source")
++        except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as return_failure:
 +            previous = f"rehearsal failed ({failure}); " if failure is not None else ""
 +            raise RuntimeError(
 +                f"{previous}return to source failed ({return_failure}); "
@@ -696,3 +698,123 @@ index 0000000000000000000000000000000000000000..a1a6854a0c52c18e8cebcdb1b874dd6e
 +            self.assertEqual(validate(live), before_live)
 +            self.assertEqual(validate(candidate), before_candidate)
 +            self.assertEqual(list(root.rglob("selection.json")), [])
+diff --git a/stockroom/test_restore_pointer_atomicity.py b/stockroom/test_restore_pointer_atomicity.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b81f3fe77519ec748b039ec4685ecceec3d15b06
+--- /dev/null
++++ b/stockroom/test_restore_pointer_atomicity.py
+@@ -0,0 +1,114 @@
++"""CP10: a failed atomic pointer replacement leaves no staged selection."""
++from pathlib import Path
++from tempfile import TemporaryDirectory
++import unittest
++from unittest.mock import patch
++
++from .restore import select, selected
++
++
++class SelectionAtomicityTests(unittest.TestCase):
++    def test_replace_failure_preserves_original_and_removes_staging(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            original = root / "live.db"
++            candidate = root / "candidate.db"
++            select(pointer, original)
++
++            actual_replace = Path.replace
++
++            def reject_pointer_replace(path, target):
++                if path.name == "selection.next":
++                    raise OSError("injected replace failure")
++                return actual_replace(path, target)
++
++            with patch.object(Path, "replace", autospec=True, side_effect=reject_pointer_replace):
++                with self.assertRaisesRegex(OSError, "injected replace failure"):
++                    select(pointer, candidate)
++
++            self.assertEqual(selected(pointer), original)
++            self.assertEqual(list(root.glob(".selection-*")), [])
++
++    def test_first_replace_failure_does_not_create_pointer(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            with patch.object(Path, "replace", side_effect=OSError("injected replace failure")):
++                with self.assertRaisesRegex(OSError, "injected replace failure"):
++                    select(pointer, root / "candidate.db")
++            self.assertFalse(pointer.exists())
++            self.assertEqual(list(root.glob(".selection-*")), [])
++
++    def test_partial_staging_write_failure_preserves_original(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            original = root / "live.db"
++            select(pointer, original)
++            before = pointer.read_bytes()
++            actual_write = Path.write_text
++
++            def fail_after_partial_write(path, data, **kwargs):
++                if path.name == "selection.next":
++                    actual_write(path, data[:5], **kwargs)
++                    raise OSError("injected partial staging write")
++                return actual_write(path, data, **kwargs)
++
++            with patch.object(Path, "write_text", autospec=True, side_effect=fail_after_partial_write):
++                with self.assertRaisesRegex(OSError, "injected partial staging write"):
++                    select(pointer, root / "candidate.db")
++
++            self.assertEqual(pointer.read_bytes(), before)
++            self.assertEqual(selected(pointer), original)
++            self.assertEqual(list(root.glob(".selection-*")), [])
++
++
++    def test_overlapping_replacements_use_distinct_staging_paths(self):
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            first, second = root / "first.db", root / "second.db"
++            actual_replace = Path.replace
++            paths = []
++
++            def overlap(path, target):
++                paths.append(path)
++                if len(paths) == 1:
++                    select(pointer, second)
++                    self.assertEqual(selected(pointer), second)
++                return actual_replace(path, target)
++
++            with patch.object(Path, "replace", autospec=True, side_effect=overlap):
++                select(pointer, first)
++            self.assertEqual(len(set(paths)), 2)
++            self.assertEqual(selected(pointer), first)
++            self.assertEqual(list(root.glob(".selection-*")), [])
++
++    def test_failed_outer_replace_does_not_remove_nested_selection(self):
++        """A failing overlapping writer must not delete another writer's staging."""
++        with TemporaryDirectory() as temp:
++            root = Path(temp)
++            pointer = root / "selection.json"
++            original, outer, nested = (root / name for name in ("live.db", "outer.db", "nested.db"))
++            select(pointer, original)
++            before = pointer.read_bytes()
++            actual_replace = Path.replace
++            staged_paths = []
++
++            def nested_then_fail(path, target):
++                staged_paths.append(path)
++                if len(staged_paths) == 1:
++                    select(pointer, nested)
++                    raise OSError("injected outer replace failure")
++                return actual_replace(path, target)
++
++            with patch.object(Path, "replace", autospec=True, side_effect=nested_then_fail):
++                with self.assertRaisesRegex(OSError, "injected outer replace failure"):
++                    select(pointer, outer)
++
++            self.assertEqual(len(staged_paths), 2)
++            self.assertNotEqual(staged_paths[0].parent, staged_paths[1].parent)
++            self.assertEqual(selected(pointer), nested)
++            self.assertNotEqual(pointer.read_bytes(), before)
++            self.assertEqual(list(root.glob(".selection-*")), [])
