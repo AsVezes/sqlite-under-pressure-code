@@ -266,3 +266,25 @@ index a98a7d134b33bc208274d85e07b8b4b8bfc8a43e..e5ada006760b9f2e56c66110a8f3c793
  
  
  def main() -> int:
+diff --git a/stockroom/ledger.py b/stockroom/ledger.py
+index d29f334a8c8dd8d147fc4fd20e578bf43eb8b692..f14a100439c49e44e3ad50c18f351b19c8ee1544 100644
+--- a/stockroom/ledger.py
++++ b/stockroom/ledger.py
+@@ -84,7 +84,16 @@
+     with closing(connect(path)) as db:
+         with write_transaction(db):
+             require_version(db, 0)
+-            db.executescript(SCHEMA_V1.read_text(encoding="utf-8"))
++            # executescript() commits a pending transaction before executing SQL.
++            # Execute complete DDL statements within the existing BEGIN IMMEDIATE.
++            statement = ""
++            for line in SCHEMA_V1.read_text(encoding="utf-8").splitlines(keepends=True):
++                statement += line
++                if sqlite3.complete_statement(statement):
++                    db.execute(statement)
++                    statement = ""
++            if statement.strip():
++                raise ValueError("Incomplete Stockroom v1 schema statement")
+             seed_f1(db)
+             db.execute("PRAGMA user_version=1")
+         return identity(db)
