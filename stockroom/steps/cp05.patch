@@ -78,7 +78,7 @@ index 0000000000000000000000000000000000000000..2a97e50a6e0d716fa4f965e62a0d9803
 +        self.assertTrue(check_ledger(self.path)["ok"])
 diff --git a/stockroom/writer.py b/stockroom/writer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..070869ecf5d5b863116b81623947125bab39178c
+index 0000000000000000000000000000000000000000..00c56cd967413274c5fabe048b69d1fb0ee888f3
 --- /dev/null
 +++ b/stockroom/writer.py
 @@ -0,0 +1,117 @@
