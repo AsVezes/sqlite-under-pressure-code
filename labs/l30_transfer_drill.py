@@ -37,6 +37,47 @@ def check(path, expected):
         return rows
 
 
+def apply_receipt(db, op_id, delta):
+    """One atomic receipt decision; a reused ID must match its stored payload."""
+    require(type(op_id) is int and op_id > 0, "invalid receipt operation ID")
+    require(type(delta) is int and delta > 0, "invalid receipt delta")
+    stored = db.execute("SELECT delta FROM receipts WHERE op_id=?", (op_id,)).fetchone()
+    if stored is not None:
+        if stored[0] != delta:
+            raise ValueError("operation ID already committed with a different payload")
+        return False
+    db.execute("INSERT INTO receipts(op_id,delta) VALUES(?,?)", (op_id, delta))
+    updated = db.execute("UPDATE balance SET amount=amount+?", (delta,)).rowcount
+    require(updated == 1, "balance row not updated exactly once")
+    return True
+
+
+def submit_receipt(db, op_id, delta):
+    """Keep lookup, insertion and balance effects inside one write transaction."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        applied = apply_receipt(db, op_id, delta)
+        db.commit()
+        return applied
+    except BaseException:
+        db.rollback()
+        raise
+
+
+def reject_conflicting_receipt(db, path, expected, op_id, delta):
+    """Exercise the real replay path and reject a different payload causally."""
+    try:
+        submit_receipt(db, op_id, delta)
+    except ValueError as exc:
+        require(str(exc) == "operation ID already committed with a different payload",
+                "negative control: conflict failed for the wrong reason")
+    else:
+        raise RuntimeError("negative control: conflicting receipt accepted")
+    require(check(path, expected) == expected,
+            "negative control: conflict changed the recovered database")
+    return True
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="sqlite-l30-") as root:
         folder = Path(root)
@@ -51,10 +92,8 @@ def main():
                              "CREATE TABLE balance(amount INTEGER NOT NULL);"
                              "INSERT INTO balance VALUES(0);")
             for op in range(1, 6):
-                db.execute("BEGIN IMMEDIATE")
-                db.execute("INSERT INTO receipts VALUES(?,?)", (op, 1))
-                db.execute("UPDATE balance SET amount=amount+1")
-                db.commit()
+                require(submit_receipt(db, op, 1),
+                        "initial receipt unexpectedly treated as a replay")
             expected_backup = [(i, 1) for i in range(1, 6)]
             check(active, expected_backup)
             with sqlite3.connect(backup) as target:
@@ -62,9 +101,8 @@ def main():
             require(check(backup, expected_backup) == expected_backup, "backup gate failed")
             backup_sha = digest(backup)
             # Commit acknowledged AFTER the backup cut; this operation is at risk.
-            db.execute("INSERT INTO receipts VALUES(6,1)")
-            db.execute("UPDATE balance SET amount=amount+1")
-            db.commit()
+            require(submit_receipt(db, 6, 1),
+                    "post-backup receipt unexpectedly treated as a replay")
             require(check(active, expected_backup + [(6, 1)])[-1] == (6, 1),
                     "post-backup commit missing")
         start = time.perf_counter_ns()
@@ -76,21 +114,17 @@ def main():
         lost = 6 - len(check(recovered, expected_backup))
         require(lost == 1, "negative control: expected one acknowledged operation absent")
         with sqlite3.connect(recovered) as db:
-            # Replaying a known receipt is idempotent, even after ambiguous acknowledgement.
-            db.execute("BEGIN IMMEDIATE")
-            # Reused IDs are idempotent only when the payload matches.
-            stored = db.execute("SELECT delta FROM receipts WHERE op_id=5").fetchone()
-            require(stored == (1,), "replayed receipt payload mismatch")
-            # Negative control: SQLite IGNORE alone would hide this conflict.
-            conflicting = (5, 2)
-            conflict_rejected = stored is not None and stored[0] != conflicting[1]
-            require(conflict_rejected, "negative control: conflicting receipt accepted")
-            db.execute("INSERT OR IGNORE INTO receipts VALUES(5,1)")
-            require(db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 5,
-                    "duplicate receipt created")
-            db.execute("INSERT INTO receipts VALUES(6,1)")
-            db.execute("UPDATE balance SET amount=amount+1")
-            db.commit()
+            # An identical retry traverses the same transaction path and writes nothing.
+            require(submit_receipt(db, 5, 1) is False,
+                    "identical receipt was applied twice")
+            require(check(recovered, expected_backup) == expected_backup,
+                    "identical retry changed the recovered database")
+            # A local comparison, or INSERT OR IGNORE, is not a negative-control test.
+            conflict_rejected = reject_conflicting_receipt(
+                db, recovered, expected_backup, 5, 2
+            )
+            require(submit_receipt(db, 6, 1),
+                    "reconciliation receipt unexpectedly treated as a replay")
         require(check(recovered, expected_backup + [(6, 1)])[-1] == (6, 1),
                 "reconciliation failed")
         restore_ms = (time.perf_counter_ns() - start) / 1_000_000
