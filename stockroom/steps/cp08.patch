@@ -1,8 +1,8 @@
 diff --git a/stockroom/ledger.py b/stockroom/ledger.py
-index a35f625a00d87fc237017460b3e75a3925121fa0..d29f334a8c8dd8d147fc4fd20e578bf43eb8b692 100644
+index 5f87e3328e70f95e83645bd526f4645656160311..f14a100439c49e44e3ad50c18f351b19c8ee1544 100644
 --- a/stockroom/ledger.py
 +++ b/stockroom/ledger.py
-@@ -50,6 +50,13 @@ def require_version(db: sqlite3.Connection, version: int) -> dict:
+@@ -50,6 +50,13 @@
      return details
  
  
@@ -16,7 +16,17 @@ index a35f625a00d87fc237017460b3e75a3925121fa0..d29f334a8c8dd8d147fc4fd20e578bf4
  def seed_f1(db: sqlite3.Connection) -> None:
      # Load the shared pilot in memory and copy just its stable opening data.
      # Application DDL and constraints come from schema_v1.sql.
-@@ -85,5 +92,5 @@ def initialize_ledger(path: Path) -> dict:
+@@ -77,7 +84,8 @@
+     with closing(connect(path)) as db:
+         with write_transaction(db):
+             require_version(db, 0)
+-            # Keep DDL inside BEGIN IMMEDIATE; executescript commits implicitly.
++            # executescript() commits a pending transaction before executing SQL.
++            # Execute complete DDL statements within the existing BEGIN IMMEDIATE.
+             statement = ""
+             for line in SCHEMA_V1.read_text(encoding="utf-8").splitlines(keepends=True):
+                 statement += line
+@@ -93,5 +101,5 @@
  
  def check_ledger(path: Path) -> dict:
      with closing(connect(path, read_only=True)) as db:
@@ -360,10 +370,10 @@ index 0b3cea1d99ccd83282beede3b440647d6ad4310f..647e73bde17fff3385569f6094046912
                  db.execute(f"CREATE INDEX IF NOT EXISTS {INDEX} "
                             "ON transfer(item_id,destination_location_id,id)")
 diff --git a/stockroom/writer.py b/stockroom/writer.py
-index 070869ecf5d5b863116b81623947125bab39178c..670314106d80d102fee6f46578f590b601bfeb8d 100644
+index 00c56cd967413274c5fabe048b69d1fb0ee888f3..57ea0eda2688575903b025b3b23eca70e5d4936f 100644
 --- a/stockroom/writer.py
 +++ b/stockroom/writer.py
-@@ -6,7 +6,7 @@ import sqlite3
+@@ -6,7 +6,7 @@
  from time import monotonic, sleep
  
  from .environment import connect
@@ -372,16 +382,16 @@ index 070869ecf5d5b863116b81623947125bab39178c..670314106d80d102fee6f46578f590b6
  from .observe import event
  from .operation import execute, parser
  from .transfer import Transfer, apply_in_transaction
-@@ -14,7 +14,7 @@ from .transfer import Transfer, apply_in_transaction
+@@ -14,7 +14,7 @@
  
  def install(path):
      with closing(connect(path)) as db, write_transaction(db):
 -        require_version(db, 1)
 +        require_ledger(db)
-         db.executescript("""
-             CREATE TABLE IF NOT EXISTS receipt(
+         # Separate statements preserve rollback across DDL and receipt backfill.
+         db.execute("""CREATE TABLE IF NOT EXISTS receipt(
                seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
-@@ -45,7 +45,7 @@ def submit(path, request, wait_ms=500):
+@@ -44,7 +44,7 @@
          try:
              with closing(connect(path, timeout=0)) as db:
                  with write_transaction(db, lambda phase, error=None: event(events, phase, error)):
