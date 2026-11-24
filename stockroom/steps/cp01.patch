@@ -64,7 +64,7 @@ index 9c128271357aa0f58326f1cf0a0d425373812f31..45443d743a0aa9deed96c4ec09636a0b
  if __name__ == "__main__":
 diff --git a/stockroom/ledger.py b/stockroom/ledger.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..269d22d07b2ff0c05666fb797c7f1236a139948a
+index 0000000000000000000000000000000000000000..66e2f05fee9ce86f8dba805ebf6ccbc26fd2a629
 --- /dev/null
 +++ b/stockroom/ledger.py
 @@ -0,0 +1,80 @@
