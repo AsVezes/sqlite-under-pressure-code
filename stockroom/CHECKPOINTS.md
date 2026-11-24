@@ -124,31 +124,50 @@ the added and removed lines before applying each patch. You can implement the
 listed changes in an editor and use the patch as the exact reference for any
 supporting code. Apply a step once. Follow the chapter's own database commands
 and keep its exit state before moving on. The [tree manifest](steps/trees.json)
-records the expected source tree after every step **as last verified**.
-**Gate M warning (2026-11-23):** `cp01.patch` and `cp05.patch` were corrected
-after the manifest was generated. The recorded `output_tree` IDs have **not**
-been recalculated or verified against those corrected patches. From CP01
-onward, subsequent `input_tree` IDs are also historical: each checkpoint's
-input must equal the actual reconstructed output of its predecessor, not the
-stale manifest entry. Do not use these IDs as evidence that the updated
-cumulative path passes; treat comparisons as diagnostic until a fresh
-CP00–CP11 replay publishes verified replacement IDs. The `archive_commit`
-values remain historical direct-entry snapshots and are unaffected by patch
-edits. The `input_tree` and `output_tree` fields describe the **numbered-patch
-build-along** source states. In particular,
-CP08–CP11 include repairs folded into the numbered patches, whereas their
-historical snapshot commits predate those repairs. Do not equate the manifest's
-`output_tree` with the Git root tree of an `archive_commit`, or treat a missing
-GitHub tree-object URL as proof that the patch cannot be applied. To validate
-an `output_tree`, apply the patches cumulatively to the stated entrance in a
-disposable source copy, initialize Git if starting from a ZIP, and stage the
-complete source state with `git add -A` before running `git write-tree`.
-`git apply` without `--index` changes the worktree but does **not** stage those
-changes: running `git write-tree` immediately afterward hashes the old index,
-not the reconstructed checkpoint. Compare the resulting tree ID with the
-manifest's `output_tree` at each step. Keep the database and downloaded patch
-files outside the source tree so they cannot contaminate the staged tree.
-This comparison has not been independently replayed here.
+records a **content-level reconstruction** of the numbered CP00–CP11 patch
+chain from the fixed starter tree `8ca7b2a8cd177fa86115273f4450f9d0d33bb07d`.
+After correcting the atomic DDL/receipt patches and restoring newer recovery
+tests, the Git blob hashes for the patched files and the Git tree hashes were
+recalculated with a separate SHA-1 implementation. Every new or changed patch
+section was checked against its preimage and output content, including the
+changes to `ledger.py`, `writer.py` and `restore.py`. The 12 declared trees
+now form an uninterrupted chain. **This is a static content reconstruction, not
+a run of `git apply`, Stockroom tests, or independent Gate M acceptance.**
+
+The `archive_commit` values are **historical direct-entry snapshots** and are
+not the source tree states of the revised build-along. In particular, CP08–CP11
+include repairs folded into the numbered patches, whereas historical snapshot
+commits predate some repairs. Do not compare an `archive_commit` root tree to
+a revised `output_tree` and declare failure or success from that comparison.
+
+### Reproduce the cumulative build with Git — offline, no Work or Actions
+
+Download and unpack the **fixed starter commit** `26b6888f3ab74fb47248dfde7a113b2afd78b46d`
+to a clean directory. From a local checkout of the public kit at a single
+recorded commit SHA, run:
+
+~~~sh
+python3 tools/verify_patch_chain.py \
+  --starter "/absolute/path/to/unpacked-starter" \
+  --run-tests \
+  --log-dir "/absolute/path/to/new-empty-evidence-dir"
+~~~
+
+The script copies the starter into a private temporary directory; it does
+**not** alter the starter or an existing database. It checks the starter tree,
+performs `git apply --check` followed by actual `git apply`, stages all
+source files with `git add -A`, compares each measured `git write-tree`
+against `steps/trees.json`, and optionally runs the Stockroom tests after
+each checkpoint. It fails at the first mismatch and records stdout/stderr,
+exit status and engine identity in the generated evidence. `--log-dir` must
+be empty to avoid overwriting previous evidence.
+
+Keep all database files and downloaded patches outside the reconstructed
+source tree. After a successful script run, separately execute the chapter
+commands and adverse controls with the relevant version of SQLite. A Python
+`sqlite3` build is **not** evidence that a standalone `sqlite3` CLI uses the
+same engine. An independent reviewer must repeat the suite before formal
+homologation.
 
 For direct entry into the historical CP08 snapshot, apply
 [`cp08-repair.patch`](steps/cp08-repair.patch) before running the chapter.
