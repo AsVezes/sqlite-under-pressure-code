@@ -117,10 +117,10 @@ index 0d01c9094b2c67d93e220ca639748e75169e7707..f98de95de1b917428eaf41667cf4375b
 +            with self.assertRaisesRegex(ValueError, "must use DELETE journal mode"):
 +                verify_bundle(bundle)
 diff --git a/stockroom/writer.py b/stockroom/writer.py
-index 670314106d80d102fee6f46578f590b601bfeb8d..401e40d634d82adc6f17b4653173f766455b78b6 100644
+index 670314106d80d102fee6f46578f590b601bfeb8d..735be4d1f011d37c6dcbe7ef2e112b0bccfbb54d 100644
 --- a/stockroom/writer.py
 +++ b/stockroom/writer.py
-@@ -12,18 +12,30 @@ from .operation import execute, parser
+@@ -12,18 +12,32 @@
  from .transfer import Transfer, apply_in_transaction
  
  
@@ -140,21 +140,28 @@ index 670314106d80d102fee6f46578f590b601bfeb8d..401e40d634d82adc6f17b4653173f766
      with closing(connect(path)) as db, write_transaction(db):
          require_ledger(db)
 -        db.executescript("""
-+        db.executescript(f"""
-             CREATE TABLE IF NOT EXISTS receipt(
+-            CREATE TABLE IF NOT EXISTS receipt(
++        # executescript() commits a pending transaction before executing its SQL.
++        # Use individual statements so DDL, backfill and validation roll back together.
++        db.execute("""CREATE TABLE IF NOT EXISTS receipt(
                seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
-             ) STRICT;
-             INSERT INTO receipt(transfer_id)
-               SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid;
+-            ) STRICT;
+-            INSERT INTO receipt(transfer_id)
+-              SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid;
 -            CREATE TRIGGER IF NOT EXISTS record_transfer_receipt AFTER INSERT ON transfer
 -            BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END;
-+            {RECEIPT_TRIGGER.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1)};
-         """)
+-        """)
++            ) STRICT""")
++        db.execute("""INSERT INTO receipt(transfer_id)
++              SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid""")
++        db.execute(RECEIPT_TRIGGER.replace(
++            "CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1
++        ))
 +        require_receipt_trigger(db)
          return {"receipt_count": watermark(db)}
  
  
-@@ -36,6 +48,13 @@ def watermark(db):
+@@ -36,6 +50,13 @@
      return maximum
  
  
@@ -168,7 +175,7 @@ index 670314106d80d102fee6f46578f590b601bfeb8d..401e40d634d82adc6f17b4653173f766
  def submit(path, request, wait_ms=500):
      if type(wait_ms) is not int or not 0 <= wait_ms <= 60_000:
          raise ValueError("wait-ms must be an integer from 0 to 60000")
-@@ -57,8 +76,7 @@ def submit(path, request, wait_ms=500):
+@@ -57,8 +78,7 @@
                          sequence = prior[4]
                      else:
                          apply_in_transaction(db, request)
@@ -178,3 +185,76 @@ index 670314106d80d102fee6f46578f590b601bfeb8d..401e40d634d82adc6f17b4653173f766
              return {"id": request.id, "receipt": sequence, "replayed": prior is not None,
                      "events": events}
          except sqlite3.OperationalError as exc:
+diff --git a/stockroom/test_writer.py b/stockroom/test_writer.py
+index 2a97e50a6e0d716fa4f965e62a0d98039ba53982..2719d98e87892b52c9491052266c842ac1d8545c 100644
+--- a/stockroom/test_writer.py
++++ b/stockroom/test_writer.py
+@@ -34,6 +34,36 @@
+             self.assertEqual(watermark(db), 1)
+         self.assertTrue(check_ledger(self.path)["ok"])
+ 
++    def test_failed_install_rolls_back_receipt_schema_and_backfill(self):
++        # A conflicting trigger must not leave an installed receipt table behind.
++        transfer(self.path, self.request)
++        with closing(connect(self.path)) as db:
++            db.execute("""CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer
++                          BEGIN SELECT 1; END""")
++        with self.assertRaisesRegex(ValueError, "receipt trigger"):
++            install(self.path)
++        with closing(connect(self.path)) as db:
++            names = {row[0] for row in db.execute(
++                "SELECT name FROM sqlite_schema WHERE type='table' AND name='receipt'"
++            )}
++            self.assertEqual(names, set())
++            self.assertEqual(db.execute("SELECT count(*) FROM transfer").fetchone()[0], 1)
++        self.assertTrue(check_ledger(self.path)["ok"])
++
++    def test_missing_receipt_trigger_rolls_back_the_entire_transfer(self):
++        install(self.path)
++        before = check_ledger(self.path)
++        with closing(connect(self.path)) as db:
++            db.execute("DROP TRIGGER record_transfer_receipt")
++        # The transfer INSERT can succeed without the trigger, but a receipt
++        # must exist before the transaction is allowed to commit.
++        with self.assertRaisesRegex(ValueError, "did not produce a receipt"):
++            submit(self.path, self.request)
++        self.assertEqual(check_ledger(self.path), before)
++        with closing(connect(self.path)) as db:
++            self.assertEqual(db.execute("SELECT count(*) FROM transfer").fetchone()[0], 0)
++            self.assertEqual(db.execute("SELECT count(*) FROM receipt").fetchone()[0], 0)
++
+     def test_held_writer_cannot_change_state_and_budget_is_classified(self):
+         install(self.path)
+         with closing(connect(self.path)) as db:
+@@ -70,3 +100,31 @@
+                 for i in range(2, 4)]
+         self.assertEqual([row["receipt"] for row in run_queue(self.path, more)], [2, 3])
+         self.assertTrue(check_ledger(self.path)["ok"])
++
++    def test_cli_rejects_reused_id_with_different_payload_and_preserves_ledger(self):
++        import json
++        import subprocess
++        import sys
++
++        install(self.path)
++        first = subprocess.run(
++            [sys.executable, "-m", "stockroom.writer", str(self.path), "submit",
++             "op-cli", "item-bolt", "loc-north", "loc-south", "3"],
++            capture_output=True, text=True, check=False,
++        )
++        self.assertEqual(first.returncode, 0, first.stderr)
++        self.assertEqual(json.loads(first.stdout)["replayed"], False)
++        before = check_ledger(self.path)
++        rejected = subprocess.run(
++            [sys.executable, "-m", "stockroom.writer", str(self.path), "submit",
++             "op-cli", "item-bolt", "loc-north", "loc-south", "2"],
++            capture_output=True, text=True, check=False,
++        )
++        self.assertEqual(rejected.returncode, 2, rejected.stderr)
++        self.assertEqual(rejected.stdout, "")
++        self.assertEqual(
++            json.loads(rejected.stderr)["error"],
++            "operation ID already committed with a different payload",
++        )
++        self.assertEqual(check_ledger(self.path), before)
++
