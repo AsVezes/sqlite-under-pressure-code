@@ -80,6 +80,21 @@ each numbered patch with Git, stages the tree and compares all twelve
 `git write-tree` IDs with the manifest. It optionally runs Stockroom tests
 after every step and records the evidence. It requires Git and Python,
 **no GitHub Actions or Work sessions**; it never runs on a live database.
+The historical **direct-entry** route has a separate offline verifier,
+`tools/verify_direct_entries.py`. Supply the unpacked snapshot for CP08, CP09,
+CP10 or CP11 and the matching `--checkpoint` number. For example:
+
+~~~sh
+python3 tools/verify_direct_entries.py \
+  --snapshot "/absolute/path/to/historical-cp11-archive" \
+  --checkpoint 11 --run-tests
+~~~
+
+This script checks the historical source tree, applies the repairs in order
+and verifies repaired Git file blobs before optional Stockroom tests.
+Both verifiers have synthetic Git regression tests in `tests/`; these tests
+exercise their failure handling, **not the full historical checkpoints**.
+
 The verifier itself was checked with a synthetic successful patch and an
 adversarial modified patch, not a complete checkout in this environment.
 
