@@ -5,6 +5,7 @@ Simulates loss of an active workspace after a verified online backup. All
 databases are disposable. RPO is counted in committed operations; elapsed
 time is a local observation, not an availability guarantee.
 """
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -25,7 +26,7 @@ def digest(path):
 
 
 def check(path, expected):
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db:
         require(db.execute("PRAGMA integrity_check").fetchone()[0] == "ok",
                 "structural integrity failed")
         require(db.execute("PRAGMA foreign_key_check").fetchall() == [],
@@ -84,7 +85,7 @@ def main():
         active = folder / "active.sqlite"
         backup = folder / "verified.sqlite"
         recovered = folder / "recovered.sqlite"
-        with sqlite3.connect(active) as db:
+        with closing(sqlite3.connect(active)) as db:
             engine = {"version": db.execute("SELECT sqlite_version()").fetchone()[0],
                       "source_id": db.execute("SELECT sqlite_source_id()").fetchone()[0]}
             db.execute("PRAGMA journal_mode=WAL")
@@ -96,7 +97,7 @@ def main():
                         "initial receipt unexpectedly treated as a replay")
             expected_backup = [(i, 1) for i in range(1, 6)]
             check(active, expected_backup)
-            with sqlite3.connect(backup) as target:
+            with closing(sqlite3.connect(backup)) as target:
                 db.backup(target)
             require(check(backup, expected_backup) == expected_backup, "backup gate failed")
             backup_sha = digest(backup)
@@ -113,7 +114,7 @@ def main():
         # Negative: the restore MUST NOT be reported as zero-loss.
         lost = 6 - len(check(recovered, expected_backup))
         require(lost == 1, "negative control: expected one acknowledged operation absent")
-        with sqlite3.connect(recovered) as db:
+        with closing(sqlite3.connect(recovered)) as db:
             # An identical retry traverses the same transaction path and writes nothing.
             require(submit_receipt(db, 5, 1) is False,
                     "identical receipt was applied twice")
