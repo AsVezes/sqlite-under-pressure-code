@@ -33,8 +33,9 @@ def check(path, expected):
                 "foreign key violation")
         rows = db.execute("SELECT op_id, delta FROM receipts ORDER BY op_id").fetchall()
         require(rows == expected, "receipt continuity mismatch")
-        require(db.execute("SELECT amount FROM balance").fetchone()[0] ==
-                sum(v for _, v in expected), "balance invariant failed")
+        balance_rows = db.execute("SELECT amount FROM balance").fetchall()
+        require(balance_rows == [(sum(delta for _, delta in expected),)],
+                "balance invariant failed")
         return rows
 
 

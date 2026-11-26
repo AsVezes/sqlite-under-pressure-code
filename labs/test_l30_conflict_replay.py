@@ -75,6 +75,22 @@ class ReceiptReplayTests(unittest.TestCase):
             self.assertFalse(db.in_transaction)
         self.assertEqual(lab.check(self.path, self.expected), self.expected)
 
+    def test_invariant_rejects_missing_balance_row(self):
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("DELETE FROM balance")
+            db.commit()
+        with self.assertRaisesRegex(RuntimeError, "^balance invariant failed$"):
+            lab.check(self.path, self.expected)
+
+    def test_invariant_rejects_extra_balance_row(self):
+        for extra in (1, 2):
+            with self.subTest(extra=extra), closing(sqlite3.connect(self.path)) as db:
+                db.execute("DELETE FROM balance WHERE rowid > 1")
+                db.execute("INSERT INTO balance VALUES(?)", (extra,))
+                db.commit()
+                with self.assertRaisesRegex(RuntimeError, "^balance invariant failed$"):
+                    lab.check(self.path, self.expected)
+
     def test_failed_balance_update_rolls_back_receipt(self):
         with closing(sqlite3.connect(self.path)) as db:
             db.execute("DELETE FROM balance")
