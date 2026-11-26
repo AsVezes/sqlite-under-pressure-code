@@ -20,7 +20,10 @@ import subprocess
 import sys
 import tempfile
 
-from verify_patch_chain import run, safe_copy_starter
+if __package__:
+    from .verify_patch_chain import run, safe_copy_starter
+else:
+    from verify_patch_chain import run, safe_copy_starter
 
 
 SNAPSHOT_TREES = {
