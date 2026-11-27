@@ -51,6 +51,8 @@ def apply_receipt(db, op_id, delta):
     db.execute("INSERT INTO receipts(op_id,delta) VALUES(?,?)", (op_id, delta))
     updated = db.execute("UPDATE balance SET amount=amount+?", (delta,)).rowcount
     require(updated == 1, "balance row not updated exactly once")
+    persisted = db.execute("SELECT delta FROM receipts WHERE op_id=?", (op_id,)).fetchall()
+    require(persisted == [(delta,)], "receipt row missing or changed before commit")
     return True
 
 

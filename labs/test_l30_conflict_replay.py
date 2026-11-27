@@ -102,6 +102,21 @@ class ReceiptReplayTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT op_id,delta FROM receipts").fetchall(),
                              self.expected)
 
+    def test_missing_new_receipt_rolls_back_balance(self):
+        controls = (
+            ("BEFORE", "SELECT RAISE(IGNORE)"),
+            ("AFTER", "DELETE FROM receipts WHERE op_id=NEW.op_id"),
+        )
+        for timing, action in controls:
+            with self.subTest(timing=timing), closing(sqlite3.connect(self.path)) as db:
+                db.execute(f"CREATE TRIGGER discard_receipt {timing} INSERT ON receipts "
+                           f"BEGIN {action}; END")
+                with self.assertRaisesRegex(RuntimeError, "receipt row missing or changed"):
+                    lab.submit_receipt(db, 6, 2)
+                self.assertFalse(db.in_transaction)
+                self.assertEqual(lab.check(self.path, self.expected), self.expected)
+                db.execute("DROP TRIGGER discard_receipt")
+
 
 if __name__ == "__main__":
     unittest.main()
