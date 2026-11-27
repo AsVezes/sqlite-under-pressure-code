@@ -1,5 +1,5 @@
 diff --git a/stockroom/backup.py b/stockroom/backup.py
-index 39e1e989bc68c3ad2fa768d57453c52a1910b031..a63b7cd9d07b36ab63a9c5eac2d4aaf465cf92e8 100644
+index 39e1e989bc68c3ad2fa768d57453c52a1910b031..4220e47cc0af8dc8935ee7b8b449405474d22e28 100644
 --- a/stockroom/backup.py
 +++ b/stockroom/backup.py
 @@ -8,10 +8,12 @@ from tempfile import TemporaryDirectory
@@ -30,19 +30,33 @@ index 39e1e989bc68c3ad2fa768d57453c52a1910b031..a63b7cd9d07b36ab63a9c5eac2d4aaf4
          state = require_ledger(db)
          if state["schema_version"] != 2:
              raise ValueError("backup or restore requires schema v2")
-@@ -29,9 +33,10 @@ def validate(path):
+@@ -29,9 +33,24 @@ def validate(path):
              raise ValueError("structural integrity check failed")
          if db.execute("PRAGMA foreign_key_check").fetchall():
              raise ValueError("foreign key check failed")
 +        require_receipt_trigger(db)
          state["watermark"] = watermark(db)
++        # A rebuilt table can have valid pages and FKs but lack the original
++        # uniqueness constraints. Check the receipt bijection in this snapshot.
++        sequences = db.execute("""
++            SELECT count(DISTINCT seq), count(CASE WHEN typeof(seq)='integer' THEN 1 END)
++            FROM receipt
++        """).fetchone()
++        if sequences != (state["watermark"], state["watermark"]):
++            raise ValueError("backup receipt sequence is not unique or contains noninteger values")
++        if db.execute("""
++            SELECT 1 FROM transfer AS t
++            WHERE NOT EXISTS (SELECT 1 FROM receipt AS r WHERE r.transfer_id=t.id)
++            LIMIT 1
++        """).fetchone():
++            raise ValueError("backup is missing a transfer receipt")
          state["source_id"] = db.execute("SELECT sqlite_source_id()").fetchone()[0]
 -    state["ledger"] = check_ledger(path)
 +        state["ledger"] = inspect_connection(db)
      if not state["ledger"]["ok"]:
          raise ValueError("ledger reconciliation failed")
      return state
-@@ -77,12 +82,16 @@ def verify_bundle(bundle):
+@@ -77,12 +96,16 @@ def verify_bundle(bundle):
      file, metadata = bundle / "ledger.db", bundle / "manifest.json"
      if any(p.is_symlink() or not p.is_file() for p in (file, metadata)):
          raise ValueError("backup files must be regular files")
@@ -61,10 +75,10 @@ index 39e1e989bc68c3ad2fa768d57453c52a1910b031..a63b7cd9d07b36ab63a9c5eac2d4aaf4
          if state[key] != manifest.get(key):
              raise ValueError(f"backup metadata mismatch: {key}")
 diff --git a/stockroom/test_backup.py b/stockroom/test_backup.py
-index 0d01c9094b2c67d93e220ca639748e75169e7707..f98de95de1b917428eaf41667cf4375bb0080c5c 100644
+index 0d01c9094b2c67d93e220ca639748e75169e7707..d776ec5eb34e979c8610c3bc8787243f81ca5c9b 100644
 --- a/stockroom/test_backup.py
 +++ b/stockroom/test_backup.py
-@@ -1,9 +1,10 @@
+@@ -1,15 +1,16 @@
  from contextlib import closing
  from pathlib import Path
  from tempfile import TemporaryDirectory
@@ -76,7 +90,14 @@ index 0d01c9094b2c67d93e220ca639748e75169e7707..f98de95de1b917428eaf41667cf4375b
  from .environment import connect, initialize_workspace
  from .ledger import initialize_ledger
  from .migrate import step
-@@ -45,3 +46,39 @@ class BackupTests(unittest.TestCase):
+ from .storage import profile
+ from .transfer import Transfer
+-from .writer import install, submit
++from .writer import RECEIPT_TRIGGER, install, submit
+ 
+ 
+ def ready(root):
+@@ -45,3 +46,77 @@ class BackupTests(unittest.TestCase):
                  capture(path, root, progress=fail)
              self.assertEqual(latest(root, manifest["workspace_id"]), good)
              self.assertEqual(list(root.glob(".stockroom-stage-*")), [])
@@ -94,6 +115,44 @@ index 0d01c9094b2c67d93e220ca639748e75169e7707..f98de95de1b917428eaf41667cf4375b
 +                capture(path, root)
 +            self.assertEqual(list(root.glob("stockroom-backup-*")), [])
 +
++
++    def test_receipts_cannot_be_replaced_by_duplicate_ids_or_sequences(self):
++        for receipts, reason in (
++            ([(1, "first"), (2, "first"), (3, "third")], "missing a transfer receipt"),
++            ([(1, "first"), (1, "second"), (3, "third")], "sequence is not unique"),
++            ([(1, "first"), (1.5, "second"), (3, "third")], "noninteger values"),
++        ):
++            with self.subTest(receipts=receipts), TemporaryDirectory() as temp:
++                root = Path(temp)
++                path = ready(root)
++                for operation in ("first", "second", "third"):
++                    submit(path, Transfer(operation, "item-bolt", "loc-north", "loc-south", 1))
++                bundle = Path(capture(path, root)["bundle"])
++                state, manifest = verify_bundle(bundle)
++                self.assertEqual(state["watermark"], 3)
++                for database in (bundle / "ledger.db", path):
++                    with closing(connect(database)) as db:
++                        db.executescript("""
++                            DROP TRIGGER record_transfer_receipt;
++                            DROP TABLE receipt;
++                            CREATE TABLE receipt(
++                                seq ANY NOT NULL,
++                                transfer_id ANY NOT NULL REFERENCES transfer(id)
++                            ) STRICT;
++                        """)
++                        db.executemany("INSERT INTO receipt VALUES(?,?)", receipts)
++                        db.execute(RECEIPT_TRIGGER)
++                        self.assertEqual(db.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
++                        self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
++                manifest["sha256"] = digest(bundle / "ledger.db")
++                (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
++                with self.assertRaisesRegex(ValueError, reason):
++                    verify_bundle(bundle)
++                self.assertIsNone(latest(root, manifest["workspace_id"]))
++                with self.assertRaisesRegex(ValueError, reason):
++                    capture(path, root)
++                self.assertEqual(list(root.glob("stockroom-backup-*")), [bundle])
++                self.assertEqual(list(root.glob(".stockroom-stage-*")), [])
 +
 +    def test_verify_rejects_sidecars_and_wal_mode_without_sidecars(self):
 +        with TemporaryDirectory() as temp:
@@ -116,11 +175,84 @@ index 0d01c9094b2c67d93e220ca639748e75169e7707..f98de95de1b917428eaf41667cf4375b
 +            manifest.write_text(json.dumps(metadata))
 +            with self.assertRaisesRegex(ValueError, "must use DELETE journal mode"):
 +                verify_bundle(bundle)
+diff --git a/stockroom/test_writer.py b/stockroom/test_writer.py
+index 2a97e50a6e0d716fa4f965e62a0d98039ba53982..2719d98e87892b52c9491052266c842ac1d8545c 100644
+--- a/stockroom/test_writer.py
++++ b/stockroom/test_writer.py
+@@ -34,6 +34,36 @@ class WriterTests(unittest.TestCase):
+             self.assertEqual(watermark(db), 1)
+         self.assertTrue(check_ledger(self.path)["ok"])
+ 
++    def test_failed_install_rolls_back_receipt_schema_and_backfill(self):
++        # A conflicting trigger must not leave an installed receipt table behind.
++        transfer(self.path, self.request)
++        with closing(connect(self.path)) as db:
++            db.execute("""CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer
++                          BEGIN SELECT 1; END""")
++        with self.assertRaisesRegex(ValueError, "receipt trigger"):
++            install(self.path)
++        with closing(connect(self.path)) as db:
++            names = {row[0] for row in db.execute(
++                "SELECT name FROM sqlite_schema WHERE type='table' AND name='receipt'"
++            )}
++            self.assertEqual(names, set())
++            self.assertEqual(db.execute("SELECT count(*) FROM transfer").fetchone()[0], 1)
++        self.assertTrue(check_ledger(self.path)["ok"])
++
++    def test_missing_receipt_trigger_rolls_back_the_entire_transfer(self):
++        install(self.path)
++        before = check_ledger(self.path)
++        with closing(connect(self.path)) as db:
++            db.execute("DROP TRIGGER record_transfer_receipt")
++        # The transfer INSERT can succeed without the trigger, but a receipt
++        # must exist before the transaction is allowed to commit.
++        with self.assertRaisesRegex(ValueError, "did not produce a receipt"):
++            submit(self.path, self.request)
++        self.assertEqual(check_ledger(self.path), before)
++        with closing(connect(self.path)) as db:
++            self.assertEqual(db.execute("SELECT count(*) FROM transfer").fetchone()[0], 0)
++            self.assertEqual(db.execute("SELECT count(*) FROM receipt").fetchone()[0], 0)
++
+     def test_held_writer_cannot_change_state_and_budget_is_classified(self):
+         install(self.path)
+         with closing(connect(self.path)) as db:
+@@ -70,3 +100,31 @@ class WriterTests(unittest.TestCase):
+                 for i in range(2, 4)]
+         self.assertEqual([row["receipt"] for row in run_queue(self.path, more)], [2, 3])
+         self.assertTrue(check_ledger(self.path)["ok"])
++
++    def test_cli_rejects_reused_id_with_different_payload_and_preserves_ledger(self):
++        import json
++        import subprocess
++        import sys
++
++        install(self.path)
++        first = subprocess.run(
++            [sys.executable, "-m", "stockroom.writer", str(self.path), "submit",
++             "op-cli", "item-bolt", "loc-north", "loc-south", "3"],
++            capture_output=True, text=True, check=False,
++        )
++        self.assertEqual(first.returncode, 0, first.stderr)
++        self.assertEqual(json.loads(first.stdout)["replayed"], False)
++        before = check_ledger(self.path)
++        rejected = subprocess.run(
++            [sys.executable, "-m", "stockroom.writer", str(self.path), "submit",
++             "op-cli", "item-bolt", "loc-north", "loc-south", "2"],
++            capture_output=True, text=True, check=False,
++        )
++        self.assertEqual(rejected.returncode, 2, rejected.stderr)
++        self.assertEqual(rejected.stdout, "")
++        self.assertEqual(
++            json.loads(rejected.stderr)["error"],
++            "operation ID already committed with a different payload",
++        )
++        self.assertEqual(check_ledger(self.path), before)
++
 diff --git a/stockroom/writer.py b/stockroom/writer.py
 index 670314106d80d102fee6f46578f590b601bfeb8d..735be4d1f011d37c6dcbe7ef2e112b0bccfbb54d 100644
 --- a/stockroom/writer.py
 +++ b/stockroom/writer.py
-@@ -12,18 +12,32 @@
+@@ -12,18 +12,32 @@ from .operation import execute, parser
  from .transfer import Transfer, apply_in_transaction
  
  
@@ -161,7 +293,7 @@ index 670314106d80d102fee6f46578f590b601bfeb8d..735be4d1f011d37c6dcbe7ef2e112b0b
          return {"receipt_count": watermark(db)}
  
  
-@@ -36,6 +50,13 @@
+@@ -36,6 +50,13 @@ def watermark(db):
      return maximum
  
  
@@ -175,7 +307,7 @@ index 670314106d80d102fee6f46578f590b601bfeb8d..735be4d1f011d37c6dcbe7ef2e112b0b
  def submit(path, request, wait_ms=500):
      if type(wait_ms) is not int or not 0 <= wait_ms <= 60_000:
          raise ValueError("wait-ms must be an integer from 0 to 60000")
-@@ -57,8 +78,7 @@
+@@ -57,8 +78,7 @@ def submit(path, request, wait_ms=500):
                          sequence = prior[4]
                      else:
                          apply_in_transaction(db, request)
@@ -185,76 +317,3 @@ index 670314106d80d102fee6f46578f590b601bfeb8d..735be4d1f011d37c6dcbe7ef2e112b0b
              return {"id": request.id, "receipt": sequence, "replayed": prior is not None,
                      "events": events}
          except sqlite3.OperationalError as exc:
-diff --git a/stockroom/test_writer.py b/stockroom/test_writer.py
-index 2a97e50a6e0d716fa4f965e62a0d98039ba53982..2719d98e87892b52c9491052266c842ac1d8545c 100644
---- a/stockroom/test_writer.py
-+++ b/stockroom/test_writer.py
-@@ -34,6 +34,36 @@
-             self.assertEqual(watermark(db), 1)
-         self.assertTrue(check_ledger(self.path)["ok"])
- 
-+    def test_failed_install_rolls_back_receipt_schema_and_backfill(self):
-+        # A conflicting trigger must not leave an installed receipt table behind.
-+        transfer(self.path, self.request)
-+        with closing(connect(self.path)) as db:
-+            db.execute("""CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer
-+                          BEGIN SELECT 1; END""")
-+        with self.assertRaisesRegex(ValueError, "receipt trigger"):
-+            install(self.path)
-+        with closing(connect(self.path)) as db:
-+            names = {row[0] for row in db.execute(
-+                "SELECT name FROM sqlite_schema WHERE type='table' AND name='receipt'"
-+            )}
-+            self.assertEqual(names, set())
-+            self.assertEqual(db.execute("SELECT count(*) FROM transfer").fetchone()[0], 1)
-+        self.assertTrue(check_ledger(self.path)["ok"])
-+
-+    def test_missing_receipt_trigger_rolls_back_the_entire_transfer(self):
-+        install(self.path)
-+        before = check_ledger(self.path)
-+        with closing(connect(self.path)) as db:
-+            db.execute("DROP TRIGGER record_transfer_receipt")
-+        # The transfer INSERT can succeed without the trigger, but a receipt
-+        # must exist before the transaction is allowed to commit.
-+        with self.assertRaisesRegex(ValueError, "did not produce a receipt"):
-+            submit(self.path, self.request)
-+        self.assertEqual(check_ledger(self.path), before)
-+        with closing(connect(self.path)) as db:
-+            self.assertEqual(db.execute("SELECT count(*) FROM transfer").fetchone()[0], 0)
-+            self.assertEqual(db.execute("SELECT count(*) FROM receipt").fetchone()[0], 0)
-+
-     def test_held_writer_cannot_change_state_and_budget_is_classified(self):
-         install(self.path)
-         with closing(connect(self.path)) as db:
-@@ -70,3 +100,31 @@
-                 for i in range(2, 4)]
-         self.assertEqual([row["receipt"] for row in run_queue(self.path, more)], [2, 3])
-         self.assertTrue(check_ledger(self.path)["ok"])
-+
-+    def test_cli_rejects_reused_id_with_different_payload_and_preserves_ledger(self):
-+        import json
-+        import subprocess
-+        import sys
-+
-+        install(self.path)
-+        first = subprocess.run(
-+            [sys.executable, "-m", "stockroom.writer", str(self.path), "submit",
-+             "op-cli", "item-bolt", "loc-north", "loc-south", "3"],
-+            capture_output=True, text=True, check=False,
-+        )
-+        self.assertEqual(first.returncode, 0, first.stderr)
-+        self.assertEqual(json.loads(first.stdout)["replayed"], False)
-+        before = check_ledger(self.path)
-+        rejected = subprocess.run(
-+            [sys.executable, "-m", "stockroom.writer", str(self.path), "submit",
-+             "op-cli", "item-bolt", "loc-north", "loc-south", "2"],
-+            capture_output=True, text=True, check=False,
-+        )
-+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
-+        self.assertEqual(rejected.stdout, "")
-+        self.assertEqual(
-+            json.loads(rejected.stderr)["error"],
-+            "operation ID already committed with a different payload",
-+        )
-+        self.assertEqual(check_ledger(self.path), before)
-+

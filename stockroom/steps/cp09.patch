@@ -1,9 +1,9 @@
 diff --git a/stockroom/backup.py b/stockroom/backup.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..a63b7cd9d07b36ab63a9c5eac2d4aaf465cf92e8
+index 0000000000000000000000000000000000000000..4220e47cc0af8dc8935ee7b8b449405474d22e28
 --- /dev/null
 +++ b/stockroom/backup.py
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,135 @@
 +"""CP09: capture and validate an online snapshot before making it selectable."""
 +from contextlib import closing
 +import hashlib
@@ -41,6 +41,20 @@ index 0000000000000000000000000000000000000000..a63b7cd9d07b36ab63a9c5eac2d4aaf4
 +            raise ValueError("foreign key check failed")
 +        require_receipt_trigger(db)
 +        state["watermark"] = watermark(db)
++        # A rebuilt table can have valid pages and FKs but lack the original
++        # uniqueness constraints. Check the receipt bijection in this snapshot.
++        sequences = db.execute("""
++            SELECT count(DISTINCT seq), count(CASE WHEN typeof(seq)='integer' THEN 1 END)
++            FROM receipt
++        """).fetchone()
++        if sequences != (state["watermark"], state["watermark"]):
++            raise ValueError("backup receipt sequence is not unique or contains noninteger values")
++        if db.execute("""
++            SELECT 1 FROM transfer AS t
++            WHERE NOT EXISTS (SELECT 1 FROM receipt AS r WHERE r.transfer_id=t.id)
++            LIMIT 1
++        """).fetchone():
++            raise ValueError("backup is missing a transfer receipt")
 +        state["source_id"] = db.execute("SELECT sqlite_source_id()").fetchone()[0]
 +        state["ledger"] = inspect_connection(db)
 +    if not state["ledger"]["ok"]:
@@ -127,10 +141,10 @@ index 0000000000000000000000000000000000000000..a63b7cd9d07b36ab63a9c5eac2d4aaf4
 +    raise SystemExit(main())
 diff --git a/stockroom/test_backup.py b/stockroom/test_backup.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..f98de95de1b917428eaf41667cf4375bb0080c5c
+index 0000000000000000000000000000000000000000..d776ec5eb34e979c8610c3bc8787243f81ca5c9b
 --- /dev/null
 +++ b/stockroom/test_backup.py
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,122 @@
 +from contextlib import closing
 +from pathlib import Path
 +from tempfile import TemporaryDirectory
@@ -143,7 +157,7 @@ index 0000000000000000000000000000000000000000..f98de95de1b917428eaf41667cf4375b
 +from .migrate import step
 +from .storage import profile
 +from .transfer import Transfer
-+from .writer import install, submit
++from .writer import RECEIPT_TRIGGER, install, submit
 +
 +
 +def ready(root):
@@ -194,6 +208,44 @@ index 0000000000000000000000000000000000000000..f98de95de1b917428eaf41667cf4375b
 +            self.assertEqual(list(root.glob("stockroom-backup-*")), [])
 +
 +
++    def test_receipts_cannot_be_replaced_by_duplicate_ids_or_sequences(self):
++        for receipts, reason in (
++            ([(1, "first"), (2, "first"), (3, "third")], "missing a transfer receipt"),
++            ([(1, "first"), (1, "second"), (3, "third")], "sequence is not unique"),
++            ([(1, "first"), (1.5, "second"), (3, "third")], "noninteger values"),
++        ):
++            with self.subTest(receipts=receipts), TemporaryDirectory() as temp:
++                root = Path(temp)
++                path = ready(root)
++                for operation in ("first", "second", "third"):
++                    submit(path, Transfer(operation, "item-bolt", "loc-north", "loc-south", 1))
++                bundle = Path(capture(path, root)["bundle"])
++                state, manifest = verify_bundle(bundle)
++                self.assertEqual(state["watermark"], 3)
++                for database in (bundle / "ledger.db", path):
++                    with closing(connect(database)) as db:
++                        db.executescript("""
++                            DROP TRIGGER record_transfer_receipt;
++                            DROP TABLE receipt;
++                            CREATE TABLE receipt(
++                                seq ANY NOT NULL,
++                                transfer_id ANY NOT NULL REFERENCES transfer(id)
++                            ) STRICT;
++                        """)
++                        db.executemany("INSERT INTO receipt VALUES(?,?)", receipts)
++                        db.execute(RECEIPT_TRIGGER)
++                        self.assertEqual(db.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
++                        self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
++                manifest["sha256"] = digest(bundle / "ledger.db")
++                (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
++                with self.assertRaisesRegex(ValueError, reason):
++                    verify_bundle(bundle)
++                self.assertIsNone(latest(root, manifest["workspace_id"]))
++                with self.assertRaisesRegex(ValueError, reason):
++                    capture(path, root)
++                self.assertEqual(list(root.glob("stockroom-backup-*")), [bundle])
++                self.assertEqual(list(root.glob(".stockroom-stage-*")), [])
++
 +    def test_verify_rejects_sidecars_and_wal_mode_without_sidecars(self):
 +        with TemporaryDirectory() as temp:
 +            root = Path(temp)
@@ -215,75 +267,11 @@ index 0000000000000000000000000000000000000000..f98de95de1b917428eaf41667cf4375b
 +            manifest.write_text(json.dumps(metadata))
 +            with self.assertRaisesRegex(ValueError, "must use DELETE journal mode"):
 +                verify_bundle(bundle)
-diff --git a/stockroom/writer.py b/stockroom/writer.py
-index 57ea0eda2688575903b025b3b23eca70e5d4936f..735be4d1f011d37c6dcbe7ef2e112b0bccfbb54d 100644
---- a/stockroom/writer.py
-+++ b/stockroom/writer.py
-@@ -12,17 +12,32 @@
- from .transfer import Transfer, apply_in_transaction
- 
- 
-+RECEIPT_TRIGGER = """CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer
-+BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END"""
-+
-+
-+def require_receipt_trigger(db):
-+    row = db.execute(
-+        "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='record_transfer_receipt'"
-+    ).fetchone()
-+    if row is None or row[0].split() != RECEIPT_TRIGGER.split():
-+        raise ValueError("receipt trigger is missing or differs from the Stockroom definition")
-+
-+
- def install(path):
-     with closing(connect(path)) as db, write_transaction(db):
-         require_ledger(db)
--        # Separate statements preserve rollback across DDL and receipt backfill.
-+        # executescript() commits a pending transaction before executing its SQL.
-+        # Use individual statements so DDL, backfill and validation roll back together.
-         db.execute("""CREATE TABLE IF NOT EXISTS receipt(
-               seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
-             ) STRICT""")
-         db.execute("""INSERT INTO receipt(transfer_id)
-               SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid""")
--        db.execute("""CREATE TRIGGER IF NOT EXISTS record_transfer_receipt AFTER INSERT ON transfer
--            BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END""")
-+        db.execute(RECEIPT_TRIGGER.replace(
-+            "CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1
-+        ))
-+        require_receipt_trigger(db)
-         return {"receipt_count": watermark(db)}
- 
- 
-@@ -35,6 +50,13 @@
-     return maximum
- 
- 
-+def receipt_for(db, transfer_id):
-+    row = db.execute("SELECT seq FROM receipt WHERE transfer_id=?", (transfer_id,)).fetchone()
-+    if row is None:
-+        raise ValueError("transfer did not produce a receipt")
-+    return row[0]
-+
-+
- def submit(path, request, wait_ms=500):
-     if type(wait_ms) is not int or not 0 <= wait_ms <= 60_000:
-         raise ValueError("wait-ms must be an integer from 0 to 60000")
-@@ -56,8 +78,7 @@
-                         sequence = prior[4]
-                     else:
-                         apply_in_transaction(db, request)
--                        sequence = db.execute("SELECT seq FROM receipt WHERE transfer_id=?",
--                                              (request.id,)).fetchone()[0]
-+                        sequence = receipt_for(db, request.id)
-             return {"id": request.id, "receipt": sequence, "replayed": prior is not None,
-                     "events": events}
-         except sqlite3.OperationalError as exc:
 diff --git a/stockroom/test_writer.py b/stockroom/test_writer.py
 index 2a97e50a6e0d716fa4f965e62a0d98039ba53982..2719d98e87892b52c9491052266c842ac1d8545c 100644
 --- a/stockroom/test_writer.py
 +++ b/stockroom/test_writer.py
-@@ -34,6 +34,36 @@
+@@ -34,6 +34,36 @@ class WriterTests(unittest.TestCase):
              self.assertEqual(watermark(db), 1)
          self.assertTrue(check_ledger(self.path)["ok"])
  
@@ -320,7 +308,7 @@ index 2a97e50a6e0d716fa4f965e62a0d98039ba53982..2719d98e87892b52c9491052266c842a
      def test_held_writer_cannot_change_state_and_budget_is_classified(self):
          install(self.path)
          with closing(connect(self.path)) as db:
-@@ -70,3 +100,31 @@
+@@ -70,3 +100,31 @@ class WriterTests(unittest.TestCase):
                  for i in range(2, 4)]
          self.assertEqual([row["receipt"] for row in run_queue(self.path, more)], [2, 3])
          self.assertTrue(check_ledger(self.path)["ok"])
@@ -352,3 +340,67 @@ index 2a97e50a6e0d716fa4f965e62a0d98039ba53982..2719d98e87892b52c9491052266c842a
 +        )
 +        self.assertEqual(check_ledger(self.path), before)
 +
+diff --git a/stockroom/writer.py b/stockroom/writer.py
+index 57ea0eda2688575903b025b3b23eca70e5d4936f..735be4d1f011d37c6dcbe7ef2e112b0bccfbb54d 100644
+--- a/stockroom/writer.py
++++ b/stockroom/writer.py
+@@ -12,17 +12,32 @@ from .operation import execute, parser
+ from .transfer import Transfer, apply_in_transaction
+ 
+ 
++RECEIPT_TRIGGER = """CREATE TRIGGER record_transfer_receipt AFTER INSERT ON transfer
++BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END"""
++
++
++def require_receipt_trigger(db):
++    row = db.execute(
++        "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='record_transfer_receipt'"
++    ).fetchone()
++    if row is None or row[0].split() != RECEIPT_TRIGGER.split():
++        raise ValueError("receipt trigger is missing or differs from the Stockroom definition")
++
++
+ def install(path):
+     with closing(connect(path)) as db, write_transaction(db):
+         require_ledger(db)
+-        # Separate statements preserve rollback across DDL and receipt backfill.
++        # executescript() commits a pending transaction before executing its SQL.
++        # Use individual statements so DDL, backfill and validation roll back together.
+         db.execute("""CREATE TABLE IF NOT EXISTS receipt(
+               seq INTEGER PRIMARY KEY, transfer_id ANY NOT NULL UNIQUE REFERENCES transfer(id)
+             ) STRICT""")
+         db.execute("""INSERT INTO receipt(transfer_id)
+               SELECT id FROM transfer WHERE id NOT IN (SELECT transfer_id FROM receipt) ORDER BY rowid""")
+-        db.execute("""CREATE TRIGGER IF NOT EXISTS record_transfer_receipt AFTER INSERT ON transfer
+-            BEGIN INSERT INTO receipt(transfer_id) VALUES (new.id); END""")
++        db.execute(RECEIPT_TRIGGER.replace(
++            "CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1
++        ))
++        require_receipt_trigger(db)
+         return {"receipt_count": watermark(db)}
+ 
+ 
+@@ -35,6 +50,13 @@ def watermark(db):
+     return maximum
+ 
+ 
++def receipt_for(db, transfer_id):
++    row = db.execute("SELECT seq FROM receipt WHERE transfer_id=?", (transfer_id,)).fetchone()
++    if row is None:
++        raise ValueError("transfer did not produce a receipt")
++    return row[0]
++
++
+ def submit(path, request, wait_ms=500):
+     if type(wait_ms) is not int or not 0 <= wait_ms <= 60_000:
+         raise ValueError("wait-ms must be an integer from 0 to 60000")
+@@ -56,8 +78,7 @@ def submit(path, request, wait_ms=500):
+                         sequence = prior[4]
+                     else:
+                         apply_in_transaction(db, request)
+-                        sequence = db.execute("SELECT seq FROM receipt WHERE transfer_id=?",
+-                                              (request.id,)).fetchone()[0]
++                        sequence = receipt_for(db, request.id)
+             return {"id": request.id, "receipt": sequence, "replayed": prior is not None,
+                     "events": events}
+         except sqlite3.OperationalError as exc:

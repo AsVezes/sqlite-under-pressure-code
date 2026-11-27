@@ -10,7 +10,7 @@ from .ledger import initialize_ledger
 from .migrate import step
 from .storage import profile
 from .transfer import Transfer
-from .writer import install, submit
+from .writer import RECEIPT_TRIGGER, install, submit
 
 
 def ready(root):
@@ -60,6 +60,44 @@ class BackupTests(unittest.TestCase):
                 capture(path, root)
             self.assertEqual(list(root.glob("stockroom-backup-*")), [])
 
+
+    def test_receipts_cannot_be_replaced_by_duplicate_ids_or_sequences(self):
+        for receipts, reason in (
+            ([(1, "first"), (2, "first"), (3, "third")], "missing a transfer receipt"),
+            ([(1, "first"), (1, "second"), (3, "third")], "sequence is not unique"),
+            ([(1, "first"), (1.5, "second"), (3, "third")], "noninteger values"),
+        ):
+            with self.subTest(receipts=receipts), TemporaryDirectory() as temp:
+                root = Path(temp)
+                path = ready(root)
+                for operation in ("first", "second", "third"):
+                    submit(path, Transfer(operation, "item-bolt", "loc-north", "loc-south", 1))
+                bundle = Path(capture(path, root)["bundle"])
+                state, manifest = verify_bundle(bundle)
+                self.assertEqual(state["watermark"], 3)
+                for database in (bundle / "ledger.db", path):
+                    with closing(connect(database)) as db:
+                        db.executescript("""
+                            DROP TRIGGER record_transfer_receipt;
+                            DROP TABLE receipt;
+                            CREATE TABLE receipt(
+                                seq ANY NOT NULL,
+                                transfer_id ANY NOT NULL REFERENCES transfer(id)
+                            ) STRICT;
+                        """)
+                        db.executemany("INSERT INTO receipt VALUES(?,?)", receipts)
+                        db.execute(RECEIPT_TRIGGER)
+                        self.assertEqual(db.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
+                        self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+                manifest["sha256"] = digest(bundle / "ledger.db")
+                (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, reason):
+                    verify_bundle(bundle)
+                self.assertIsNone(latest(root, manifest["workspace_id"]))
+                with self.assertRaisesRegex(ValueError, reason):
+                    capture(path, root)
+                self.assertEqual(list(root.glob("stockroom-backup-*")), [bundle])
+                self.assertEqual(list(root.glob(".stockroom-stage-*")), [])
 
     def test_verify_rejects_sidecars_and_wal_mode_without_sidecars(self):
         with TemporaryDirectory() as temp:

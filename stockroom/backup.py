@@ -35,6 +35,20 @@ def validate(path, *, standalone=False):
             raise ValueError("foreign key check failed")
         require_receipt_trigger(db)
         state["watermark"] = watermark(db)
+        # A rebuilt table can have valid pages and FKs but lack the original
+        # uniqueness constraints. Check the receipt bijection in this snapshot.
+        sequences = db.execute("""
+            SELECT count(DISTINCT seq), count(CASE WHEN typeof(seq)='integer' THEN 1 END)
+            FROM receipt
+        """).fetchone()
+        if sequences != (state["watermark"], state["watermark"]):
+            raise ValueError("backup receipt sequence is not unique or contains noninteger values")
+        if db.execute("""
+            SELECT 1 FROM transfer AS t
+            WHERE NOT EXISTS (SELECT 1 FROM receipt AS r WHERE r.transfer_id=t.id)
+            LIMIT 1
+        """).fetchone():
+            raise ValueError("backup is missing a transfer receipt")
         state["source_id"] = db.execute("SELECT sqlite_source_id()").fetchone()[0]
         state["ledger"] = inspect_connection(db)
     if not state["ledger"]["ok"]:
