@@ -45,7 +45,9 @@ def validate(path, *, standalone=False):
             raise ValueError("backup receipt sequence is not unique or contains noninteger values")
         if db.execute("""
             SELECT 1 FROM transfer AS t
-            WHERE NOT EXISTS (SELECT 1 FROM receipt AS r WHERE r.transfer_id=t.id)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM receipt AS r WHERE t.id COLLATE BINARY = r.transfer_id
+            )
             LIMIT 1
         """).fetchone():
             raise ValueError("backup is missing a transfer receipt")

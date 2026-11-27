@@ -64,13 +64,13 @@ class BackupTests(unittest.TestCase):
     def test_receipts_cannot_be_replaced_by_duplicate_ids_or_sequences(self):
         for receipts, reason in (
             ([(1, "first"), (2, "first"), (3, "third")], "missing a transfer receipt"),
-            ([(1, "first"), (1, "second"), (3, "third")], "sequence is not unique"),
-            ([(1, "first"), (1.5, "second"), (3, "third")], "noninteger values"),
+            ([(1, "first"), (1, "First"), (3, "third")], "sequence is not unique"),
+            ([(1, "first"), (1.5, "First"), (3, "third")], "noninteger values"),
         ):
             with self.subTest(receipts=receipts), TemporaryDirectory() as temp:
                 root = Path(temp)
                 path = ready(root)
-                for operation in ("first", "second", "third"):
+                for operation in ("first", "First", "third"):
                     submit(path, Transfer(operation, "item-bolt", "loc-north", "loc-south", 1))
                 bundle = Path(capture(path, root)["bundle"])
                 state, manifest = verify_bundle(bundle)
@@ -82,7 +82,7 @@ class BackupTests(unittest.TestCase):
                             DROP TABLE receipt;
                             CREATE TABLE receipt(
                                 seq ANY NOT NULL,
-                                transfer_id ANY NOT NULL REFERENCES transfer(id)
+                                transfer_id ANY COLLATE NOCASE NOT NULL REFERENCES transfer(id)
                             ) STRICT;
                         """)
                         db.executemany("INSERT INTO receipt VALUES(?,?)", receipts)
